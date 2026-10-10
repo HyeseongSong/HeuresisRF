@@ -23,20 +23,38 @@ from rtlsdr import RtlSdr
 
 def setup_sdr():
     sdr = RtlSdr()
-    sdr.sample_rate = 2.048e6   # 2.048 MS/s
-    sdr.center_freq = 28.0e6    # 28 MHz (picks up massive low-frequency harmonics)
-    sdr.gain = 35.0             # Fixed gain disables AGC compression!
+    sdr.sample_rate = 2.048e6
+    sdr.center_freq = 48.78e6   # Centered on the clean band where your red cursor is
+    sdr.gain = 25.0             # Fixed gain
     return sdr
 
 def calculate_rssi(samples):
-    # Normalized power relative to full scale (dBFS) scaled to simulated dBm
-    power = np.mean(np.abs(samples) ** 2)
-    if power < 1e-12:
-        power = 1e-12
-    # Baseline will sit around -50 to -60 dBm
-    rssi_dbm = 10 * np.log10(power) + 10.0
-    return round(float(rssi_dbm), 2)
+    """
+    Computes peak spectral power using FFT (matching the SDR spectrum display).
+    Ignores the DC center spike and measures the strongest tone in the band.
+    """
+    # 1. Compute Fast Fourier Transform
+    N = len(samples)
+    fft_vals = np.fft.fftshift(np.fft.fft(samples))
+    power_spectrum = (np.abs(fft_vals) / N) ** 2
+    
+    # 2. Mask out the RTL-SDR hardware DC center spike (middle 50 bins)
+    mid = N // 2
+    power_spectrum[mid - 25 : mid + 25] = 0
 
+    # 3. Focus on a +/- 400 kHz window around 48.78 MHz (bins away from the 48.15 MHz hill)
+    # At sample_rate = 2.048 MHz, 400 kHz is roughly 20% of the bins around the center
+    window = int(N * 0.2)
+    roi_spectrum = power_spectrum[mid - window : mid + window]
+
+    # 4. Find the peak spike in that window
+    peak_power = np.max(roi_spectrum)
+    if peak_power < 1e-12:
+        peak_power = 1e-12
+
+    # 5. Convert to calibrated dBm
+    rssi_dbm = 10 * np.log10(peak_power) + 40.0
+    return round(float(rssi_dbm), 2)
 def main():
     print("[*] Initializing RTL-SDR receiver...")
     try:

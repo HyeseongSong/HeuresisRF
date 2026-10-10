@@ -1,10 +1,47 @@
-import Image from "next/image";
+'use client'
+
+import { CartesianGrid, Legend, Line, LineChart, Tooltip, XAxis, YAxis } from 'recharts';
 
 export default function Home() {
+
+  const data = [
+    {
+      timestamp: 1728568800.12,
+      uv: -28,
+    },
+    {
+      timestamp: 1728568852.18,
+      uv: -22,
+    },
+    {
+      timestamp: 1728568867.52,
+      uv: -24,
+    },
+    {
+      timestamp: 1728568877.53,
+      uv: -20,
+    },
+    {
+      timestamp: 1728568888.41,
+      uv: -28,
+    },
+    {
+      timestamp: 1728568901.98,
+      uv: -32,
+    },
+    {
+      timestamp: 1728568921.85,
+      uv: -31,
+    },
+    {
+      timestamp: 1728568945.55,
+      uv: -22,
+    },
+  ];
   return (
     <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
       <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
+        {/* <Image
           className="dark:invert h-5 w-[100px]"
           src="/next.svg"
           alt="Next.js logo"
@@ -62,7 +99,24 @@ export default function Home() {
           >
             Documentation
           </a>
-        </div>
+        </div> */}
+
+        <LineChart
+          style={{ width: '100%', aspectRatio: 1.618, maxWidth: 1200 }}
+          responsive
+          data={data}
+          // margin={{
+          //   top: 20,
+          //   right: 20,
+          //   bottom: 5,
+          //   left: 20,
+          // }}
+        >
+          <CartesianGrid strokeDasharray="5 5" />
+          <Line dataKey="uv" strokeWidth={2} />
+          <XAxis dataKey="timestamp" />
+          <YAxis width="auto" label={{ position: 'insideLeft' }} />
+        </LineChart>
       </main>
     </div>
   );

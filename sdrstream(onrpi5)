@@ -25,7 +25,7 @@ import websockets
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
-CLOUD_URL = "ws://localhost:8000/ws/edge"
+CLOUD_URL = "ws://172.20.10.4:8000"
 DEVICE_ID = "pos_terminal_01"
 
 # Target Frequency Range: 47.2 MHz to 49.2 MHz (2.0 MHz span)

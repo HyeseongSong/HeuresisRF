@@ -2,7 +2,7 @@
 import next from "next";
 import type { ServerWebSocket } from "bun";
 import { Readable, Writable } from "node:stream";
-import { db } from "./lib/db";
+import { db } from "./lib/db"
 import { incidentVerdicts } from "./lib/schema";
 import { parseHardwarePayload, RawHardwarePayload } from "./lib/adapter";
 

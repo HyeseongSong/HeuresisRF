@@ -4,117 +4,92 @@ import json
 import asyncio
 import numpy as np
 
-# ==============================================================================
-# COMPATIBILITY SHIM (Keep intact)
-# ==============================================================================
+# --- DLL COMPATIBILITY SHIM ---
 _orig_getitem = ctypes.CDLL.__getitem__
-
 def _safe_getitem(self, name):
     try:
         return _orig_getitem(self, name)
     except AttributeError:
         return ctypes.CFUNCTYPE(ctypes.c_int)(lambda *args, **kwargs: 0)
-
 ctypes.CDLL.__getitem__ = _safe_getitem
-# ==============================================================================
+# ------------------------------
 
 from rtlsdr import RtlSdr
 import websockets
 
+# URL of your local or Akamai Linode backend
 # ==============================================================================
 # CONFIGURATION: Set the URL of your cloud server
-# When your teammate gives you the Linode IP, change "localhost" to that IP:
+# Replace "localhost" with your Linode IP when ready:
 # e.g., "ws://192.0.2.1:8000/ws/edge"
 # ==============================================================================
 CLOUD_URL = "ws://localhost:8000/ws/edge"
 DEVICE_ID = "pos_terminal_01"
 
-
 def setup_sdr():
     sdr = RtlSdr()
     sdr.sample_rate = 2.048e6
-    sdr.center_freq = 48.78e6   # Calibrated 48.78 MHz harmonic
+    sdr.center_freq = 48.16e6   # Calibrated 48.78 MHz harmonic
     sdr.gain = 25.0             # Fixed gain
     return sdr
 
-
-def calculate_rssi(samples):
-    """
-    Computes peak spectral power using FFT (matching the SDR spectrum display).
-    Ignores the DC center spike and measures the strongest tone in the band.
-    """
+def extract_rf_metrics(samples):
     N = len(samples)
     fft_vals = np.fft.fftshift(np.fft.fft(samples))
     power_spectrum = (np.abs(fft_vals) / N) ** 2
     
     mid = N // 2
-    power_spectrum[mid - 25 : mid + 25] = 0
+    power_spectrum[mid - 25 : mid + 25] = 0  # Mask DC spike
 
     window = int(N * 0.2)
     roi_spectrum = power_spectrum[mid - window : mid + window]
 
+    # 1. Peak power in dBm
     peak_power = np.max(roi_spectrum)
     if peak_power < 1e-12:
         peak_power = 1e-12
+    rssi_dbm = round(float(10 * np.log10(peak_power) + 40.0), 2)
 
-    rssi_dbm = 10 * np.log10(peak_power) + 40.0
-    return round(float(rssi_dbm), 2)
+    # 2. Extract 8-bin mini spectrum slice for SDR++ style visualizer
+    bin_size = len(roi_spectrum) // 8
+    mini_spectrum = []
+    for i in range(8):
+        sub_slice = roi_spectrum[i * bin_size : (i + 1) * bin_size]
+        sub_power = np.max(sub_slice) if len(sub_slice) > 0 else 1e-12
+        sub_dbm = round(float(10 * np.log10(max(sub_power, 1e-12)) + 40.0), 1)
+        mini_spectrum.append(sub_dbm)
 
+    return rssi_dbm, mini_spectrum
 
-# ==============================================================================
-# NEW: Edge-to-Cloud Asynchronous Streaming Loop
-# ==============================================================================
 async def stream_to_cloud():
-    print("[*] Initializing RTL-SDR receiver...")
-    try:
-        sdr = setup_sdr()
-    except Exception as e:
-        print(f"[!] Error opening SDR: {e}")
-        return
-
-    print("[*] RTL-SDR successfully connected!")
-    print(f"[*] Target Cloud Server: {CLOUD_URL}")
+    sdr = setup_sdr()
+    print("[*] RTL-SDR initialized. Streaming 4Hz telemetry...")
 
     while True:
         try:
-            print("[*] Attempting to connect to Cloud WebSocket...")
             async with websockets.connect(CLOUD_URL) as ws:
-                print("[+] CONNECTED! Streaming live JSON packets to cloud...")
-                
+                print("[+] Connected to Backend!")
                 while True:
-                    # 1. Capture IQ samples and compute dBm
                     samples = sdr.read_samples(1024 * 16)
-                    rssi = calculate_rssi(samples)
+                    rssi, spectrum = extract_rf_metrics(samples)
 
-                    # 2. Package into the exact JSON schema required by backend & AI
+                    # 2. Package into JSON schema
                     payload = {
                         "device_id": DEVICE_ID,
                         "rssi": rssi,
-                        "timestamp": time.time()
+                        "spectrum": spectrum,
+                        "timestamp": round(time.time(), 2)
                     }
 
-                    # 3. Transmit JSON over WebSocket
                     await ws.send(json.dumps(payload))
-                    
-                    # Print locally so you can still monitor it
-                    print(f"[CLOUD TX] Sent: {json.dumps(payload)}")
-                    await asyncio.sleep(0.08)  # ~12 updates/sec
+                    print(f"[TX] RSSI: {rssi:>6.2f} dBm", end="\r")
+                    await asyncio.sleep(0.25) # 4 updates per second (every 250ms)
 
-        except (websockets.exceptions.ConnectionClosed, ConnectionRefusedError, OSError):
-            # If the backend is not running yet, don't crash!
-            # Sample locally and keep retrying connection every 2 seconds.
-            samples = sdr.read_samples(1024 * 16)
-            rssi = calculate_rssi(samples)
-            print(f"[LOCAL BACKUP] RSSI: {rssi:>6.2f} dBm | Cloud disconnected, retrying...")
-            await asyncio.sleep(2.0)
-            
-        except Exception as e:
-            print(f"[!] Error: {e}")
-            await asyncio.sleep(2.0)
-
+        except Exception:
+            await asyncio.sleep(1.5)
 
 if __name__ == "__main__":
     try:
         asyncio.run(stream_to_cloud())
     except KeyboardInterrupt:
-        print("\n[*] Stopping SDR stream...")
+        print("\n[*] Stopped cleanly.")

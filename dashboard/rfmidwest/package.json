@@ -3,15 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "bun run --watch server.ts",
     "build": "next build",
-    "start": "next start",
+    "start": "NODE_ENV=production bun run server.ts",
     "lint": "biome check",
     "format": "biome format --write"
   },
   "dependencies": {
+    "drizzle-orm": "^0.45.4",
     "lucide-react": "^1.55.0",
     "next": "16.4.0",
+    "openai": "^7.32.0",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "recharts": "^3.10.1"
@@ -19,10 +21,13 @@
   "devDependencies": {
     "@biomejs/biome": "2.4.2",
     "@tailwindcss/turbopack": "^4",
+    "@types/bun": "^1.4.2",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "babel-plugin-react-compiler": "1.0.0",
+    "drizzle-kit": "^0.31.11",
+    "postgres": "^3.4.9",
     "tailwindcss": "^4",
     "typescript": "^5"
   },
@@ -32,6 +37,7 @@
     "unrs-resolver"
   ],
   "trustedDependencies": [
+    "esbuild",
     "sharp",
     "unrs-resolver"
   ]

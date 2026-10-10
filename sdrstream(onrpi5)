@@ -1,0 +1,157 @@
+import ctypes
+import time
+import json
+import asyncio
+import numpy as np
+import scipy.signal as signal
+
+# ==============================================================================
+# COMPATIBILITY SHIM
+# ==============================================================================
+_orig_getitem = ctypes.CDLL.__getitem__
+
+def _safe_getitem(self, name):
+    try:
+        return _orig_getitem(self, name)
+    except AttributeError:
+        return ctypes.CFUNCTYPE(ctypes.c_int)(lambda *args, **kwargs: 0)
+
+ctypes.CDLL.__getitem__ = _safe_getitem
+# ==============================================================================
+
+from rtlsdr import RtlSdr
+import websockets
+
+# ==============================================================================
+# CONFIGURATION
+# ==============================================================================
+CLOUD_URL = "ws://localhost:8000/ws/edge"
+DEVICE_ID = "pos_terminal_01"
+
+# Target Frequency Range: 47.2 MHz to 49.2 MHz (2.0 MHz span)
+START_FREQ_HZ = 47.2e6
+STOP_FREQ_HZ = 49.2e6
+CENTER_FREQ_HZ = 48.2e6  # Centers the 2.048 MHz bandwidth perfectly over target band
+SAMPLE_RATE_HZ = 2.048e6
+
+
+def setup_sdr():
+    sdr = RtlSdr()
+    sdr.sample_rate = SAMPLE_RATE_HZ
+    sdr.center_freq = CENTER_FREQ_HZ
+    sdr.gain = 25.0  # Fixed gain matching SDR++ setup
+    return sdr
+
+def capture_spectrum_snapshot(sdr, start_freq=START_FREQ_HZ, stop_freq=STOP_FREQ_HZ, num_samples=1024*16, num_bins=200):
+    # 1. Read fresh I/Q samples
+    samples = sdr.read_samples(num_samples)
+
+    # 2. Compute Welch PSD (2048-bin Hanning window -> ~1 kHz bin resolution)
+    freqs, psd = signal.welch(
+        samples, 
+        fs=sdr.sample_rate, 
+        nperseg=2048, 
+        return_onesided=False, 
+        window='hann'
+    )
+
+    freqs_shifted = np.fft.fftshift(freqs) + sdr.center_freq
+    psd_shifted = np.fft.fftshift(psd)
+
+    # 3. Suppress hardware DC center spike artifact
+    mid = len(psd_shifted) // 2
+    psd_shifted[mid - 2 : mid + 3] = psd_shifted[mid - 5]
+
+    # 4. Crop to [47.2 MHz, 49.2 MHz]
+    mask = (freqs_shifted >= start_freq) & (freqs_shifted <= stop_freq)
+    band_freqs_mhz = freqs_shifted[mask] / 1e6
+
+    # 5. Calculate power per bin + SDR++ calibration offset
+    bin_power = psd_shifted[mask] * (sdr.sample_rate / 2048)
+    band_dbfs = 10 * np.log10(np.maximum(bin_power, 1e-12)) + 23.0
+
+    # Sort sequentially by frequency
+    sort_idx = np.argsort(band_freqs_mhz)
+    band_freqs_mhz = band_freqs_mhz[sort_idx]
+    band_dbfs = band_dbfs[sort_idx]
+
+    # 6. MAX-POOLING: Chunk array into `num_bins` buckets and keep the PEAK of each bucket
+    freq_chunks = np.array_split(band_freqs_mhz, num_bins)
+    db_chunks = np.array_split(band_dbfs, num_bins)
+
+    sampled_freqs = []
+    sampled_dbfs = []
+
+    for f_chunk, db_chunk in zip(freq_chunks, db_chunks):
+        max_idx = np.argmax(db_chunk)
+        sampled_freqs.append(f_chunk[max_idx])
+        sampled_dbfs.append(db_chunk[max_idx])
+
+    # 7. Map to formatted JSON dictionary
+    spectrum_map = {
+        f"{f:.2f}M": round(float(db), 2)
+        for f, db in zip(sampled_freqs, sampled_dbfs)
+    }
+
+    return spectrum_map
+
+# ==============================================================================
+# Edge-to-Cloud Asynchronous Streaming Loop
+# ==============================================================================
+async def stream_to_cloud():
+    print("[*] Initializing RTL-SDR receiver...", flush=True)
+    try:
+        sdr = setup_sdr()
+    except Exception as e:
+        print(f"[!] Error opening SDR: {e}", flush=True)
+        return
+
+    print("[*] RTL-SDR successfully connected!", flush=True)
+    print(f"[*] Target Band: {START_FREQ_HZ / 1e6:.1f} MHz to {STOP_FREQ_HZ / 1e6:.1f} MHz", flush=True)
+
+    while True:
+        try:
+            print("[*] Attempting to connect to Cloud WebSocket...", flush=True)
+            async with websockets.connect(CLOUD_URL) as ws:
+                print("[+] CONNECTED! Streaming live spectrum JSON to cloud...", flush=True)
+
+                while True:
+                    spectrum_map = capture_spectrum_snapshot(sdr, num_bins=200)
+
+                    payload = {
+                        "device_id": DEVICE_ID,
+                        "timestamp": round(time.time(), 2),
+                        "spectrum": spectrum_map
+                    }
+
+                    await ws.send(json.dumps(payload))
+                    print(f"[CLOUD TX] Sent payload with {len(spectrum_map)} bins.", flush=True)
+                    await asyncio.sleep(0.08)
+
+        except (websockets.exceptions.ConnectionClosed, ConnectionRefusedError, OSError):
+            # Local fallback when cloud is offline
+            spectrum_map = capture_spectrum_snapshot(sdr, num_bins=200)
+
+            payload = {
+                "device_id": DEVICE_ID,
+                "timestamp": round(time.time(), 2),
+                "spectrum": spectrum_map
+            }
+
+            with open("local_capture.json", "w") as f:
+                json.dump(payload, f, indent=4)
+
+            peak_bin = max(spectrum_map, key=spectrum_map.get)
+            print(f"[LOCAL BACKUP] Saved to local_capture.json | Peak at {peak_bin}: {spectrum_map[peak_bin]} dBFS", flush=True)
+            await asyncio.sleep(2.0)
+
+        except Exception as e:
+            print(f"[!] Error: {e}", flush=True)
+            await asyncio.sleep(2.0)
+
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(stream_to_cloud())
+    except KeyboardInterrupt:
+        print("\n[*] Stopping SDR stream...", flush=True)

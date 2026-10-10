@@ -18,13 +18,18 @@ from rtlsdr import RtlSdr
 import websockets
 
 # URL of your local or Akamai Linode backend
+# ==============================================================================
+# CONFIGURATION: Set the URL of your cloud server
+# Replace "localhost" with your Linode IP when ready:
+# e.g., "ws://192.0.2.1:8000/ws/edge"
+# ==============================================================================
 CLOUD_URL = "ws://localhost:8000/ws/edge"
 DEVICE_ID = "pos_terminal_01"
 
 def setup_sdr():
     sdr = RtlSdr()
     sdr.sample_rate = 2.048e6
-    sdr.center_freq = 48.78e6   # Monitored harmonic band
+    sdr.center_freq = 48.16e6   # Calibrated 48.78 MHz harmonic
     sdr.gain = 25.0             # Fixed gain
     return sdr
 
@@ -68,6 +73,7 @@ async def stream_to_cloud():
                     samples = sdr.read_samples(1024 * 16)
                     rssi, spectrum = extract_rf_metrics(samples)
 
+                    # 2. Package into JSON schema
                     payload = {
                         "device_id": DEVICE_ID,
                         "rssi": rssi,

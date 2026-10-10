@@ -187,5 +187,10 @@ if (process.stdin.isTTY) {
       transientFramesRemaining = 18; // 18 frames @ 10 Hz = 1.8s transaction
       console.log("\n\n>>> Triggered: LEGITIMATE EMV CHIP CARD INSERTION (1.8s active transaction)");
     }
+    if (key === "6") {
+      currentMode = "SHIELDING_ATTACK";
+      transientFramesRemaining = 5; // 500 ms @ 10 Hz (less than the 1.2s required)
+      console.log("\n\n>>> Triggered: TRANSIENT SHADOWING (500ms momentary dip, e.g. metal cart passing)");
+    }
   });
 }

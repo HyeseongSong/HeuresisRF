@@ -2,9 +2,8 @@
 import next from "next";
 import type { ServerWebSocket } from "bun";
 import { Readable, Writable } from "node:stream";
-import { db } from "./lib/db"
+import { db } from "./lib/db";
 import { incidentVerdicts } from "./lib/schema";
-import { parseHardwarePayload, RawHardwarePayload } from "./lib/adapter";
 
 // ---------------------------------------------------------------------------
 // Types & Domain Enums
@@ -39,8 +38,16 @@ export type ContainmentAction =
 export interface POSTelemetryPayload {
   device_id: string;
   rssi: number;
-  timestamp: number; // Float epoch seconds (e.g. 1728568800.12)
-  fft: number[]; // 8-point FFT spectral power values in dBm
+  timestamp: number;
+  fft: number[]; // 8-point downsampled FFT spectral power values in dBm
+}
+
+export interface RawHardwarePayload {
+  device_id: string;
+  timestamp: number;
+  spectrum?: Record<string, number>;
+  rssi?: number;
+  fft?: number[];
 }
 
 export interface RSSIPoint {
@@ -52,7 +59,7 @@ export interface SpectralAnalysis {
   bins: number[];
   peakBinIndex: number;
   peakBinPower: number;
-  spectralSpreadDb: number; // Peak bin power relative to adjacent floor
+  spectralSpreadDb: number;
   isNarrowbandSpike: boolean;
 }
 
@@ -63,6 +70,7 @@ export interface WindowMetrics {
   variance: number;
   minRssi: number;
   maxRssi: number;
+  isAttenuationBreach: boolean; // Added: Explicit physical attenuation flag
   medianIntervalMs: number;
   intervalStdDevMs: number;
   durationSec: number;
@@ -83,6 +91,8 @@ export interface AgentVerdict {
   confidence: number;
   threat_diagnosis: string[];
   rationale: string;
+  forensic_analysis?: string;
+  pci_compliance_impact?: string;
 }
 
 interface WSData {
@@ -91,24 +101,85 @@ interface WSData {
   connectedAt: number;
 }
 
-// ---------------------------------------------------------------------------
-// State-Latched Hardware Bounds & Spectral Analyzer Engine
-// ---------------------------------------------------------------------------
-
-// server.ts (Updated POSSignalTracker with Temporal Persistence & Carrier Stability)
-
 interface BreachCandidate {
+  type: "UPPER" | "LOWER";
   consecutiveCount: number;
   firstBreachTimestamp: number;
   peakBins: number[];
 }
 
+// ---------------------------------------------------------------------------
+// Hardware Payload Adapter
+// ---------------------------------------------------------------------------
+
+export function parseHardwarePayload(raw: RawHardwarePayload): POSTelemetryPayload | null {
+  if (!raw.device_id || typeof raw.timestamp !== "number") {
+    return null;
+  }
+
+  // Backward compatibility with legacy mock arrays
+  if (typeof raw.rssi === "number" && Array.isArray(raw.fft)) {
+    return {
+      device_id: raw.device_id,
+      rssi: raw.rssi,
+      timestamp: raw.timestamp,
+      fft: raw.fft,
+    };
+  }
+
+  if (!raw.spectrum || typeof raw.spectrum !== "object") {
+    return null;
+  }
+
+  const entries = Object.entries(raw.spectrum);
+  if (entries.length === 0) return null;
+
+  entries.sort((a, b) => {
+    const fA = parseFloat(a[0].replace("M", ""));
+    const fB = parseFloat(b[0].replace("M", ""));
+    return fA - fB;
+  });
+
+  const powers = entries.map(([, p]) => p);
+  const N = powers.length;
+
+  // 1. Calculate Mean Channel Power Spectral Density (Normalized RSSI in dBm)
+  let sumLinearMilliwatts = 0;
+  for (let i = 0; i < N; i++) {
+    sumLinearMilliwatts += Math.pow(10, powers[i] / 10);
+  }
+  const meanPowerMw = sumLinearMilliwatts / N;
+  const channelRssi = Number((10 * Math.log10(meanPowerMw)).toFixed(2));
+
+  // 2. Downsample 201 bins into 8 macro-bins using Peak-Hold
+  const NUM_BINS = 8;
+  const fft8: number[] = [];
+  const chunkSize = N / NUM_BINS;
+
+  for (let i = 0; i < NUM_BINS; i++) {
+    const startIdx = Math.floor(i * chunkSize);
+    const endIdx = Math.floor((i + 1) * chunkSize);
+    const slice = powers.slice(startIdx, endIdx);
+    const peakPower = Math.max(...slice);
+    fft8.push(Number(peakPower.toFixed(2)));
+  }
+
+  return {
+    device_id: raw.device_id,
+    rssi: channelRssi,
+    timestamp: raw.timestamp,
+    fft: fft8,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// State-Latched Hardware Bounds & Spectral Analyzer Engine
+// ---------------------------------------------------------------------------
+
 class POSSignalTracker {
   private windows = new Map<string, RSSIPoint[]>();
   private terminalStates = new Map<string, "SECURE" | "COMPROMISED">();
   private recoveryTimestamps = new Map<string, number>();
-  
-  // Tracks candidate breach frames to filter out non-persistent transient spikes
   private breachCandidates = new Map<string, BreachCandidate>();
 
   private readonly WINDOW_SECONDS = 3.0;
@@ -119,9 +190,9 @@ class POSSignalTracker {
   private readonly P_MIN = -82.0; 
   private readonly RECOVERY_REQUIRED_SEC = 2.0;
 
-  // Transient suppression thresholds
-  // 3 consecutive frames @ 10 Hz = 300 ms of sustained RF emission
-  private readonly REQUIRED_CONSECUTIVE_BREACHES = 3; 
+  // Asymmetric persistence thresholds @ 10 Hz
+  private readonly CONSECUTIVE_UPPER_BREACHES = 3;  // 300 ms for active shimmer
+  private readonly CONSECUTIVE_LOWER_BREACHES = 12; // 1.2 s for shielding/tamper
 
   private analyzeFFT(fft: number[]): SpectralAnalysis {
     const bins = Array.isArray(fft) && fft.length === 8 ? fft : Array(8).fill(-65.0);
@@ -172,13 +243,14 @@ class POSSignalTracker {
     const currentMeanRssi =
       recentRssiVals.reduce((acc, val) => acc + val, 0) / recentRssiVals.length;
 
-    // 3. Spectral analysis (8 macro-bins)
+    // 3. Spectral analysis
     const spectral = this.analyzeFFT(payload.fft);
 
-    // 4. Hardware bounds evaluation
+    // 4. Dual-trigger bounds evaluation
     const isWidebandUpperBreach = currentMeanRssi > this.P_MAX;
     const isNarrowbandUpperBreach = spectral.peakBinPower > this.P_MAX && spectral.isNarrowbandSpike;
     const isUpperBreach = isWidebandUpperBreach || isNarrowbandUpperBreach;
+
     const isLowerBreach = currentMeanRssi < this.P_MIN;
     const isBreached = isUpperBreach || isLowerBreach;
 
@@ -210,59 +282,66 @@ class POSSignalTracker {
     }
 
     // -------------------------------------------------------------
-    // TRANSIENT SPIKE FILTERING (While SECURE)
+    // TRANSIENT FILTERING (While SECURE)
     // -------------------------------------------------------------
     if (!isBreached) {
-      // Signal is clean: immediately reset transient candidate tracker
       this.breachCandidates.delete(device_id);
       this.recoveryTimestamps.delete(device_id);
       return null;
     }
 
-    // A breach occurred. Track persistence and carrier stability
-    const candidate = this.breachCandidates.get(device_id) ?? {
-      consecutiveCount: 0,
-      firstBreachTimestamp: timestamp,
-      peakBins: [],
-    };
+    const activeBreachType: "UPPER" | "LOWER" = isLowerBreach ? "LOWER" : "UPPER";
+    const candidate = this.breachCandidates.get(device_id);
+
+    if (!candidate || candidate.type !== activeBreachType) {
+      this.breachCandidates.set(device_id, {
+        type: activeBreachType,
+        consecutiveCount: 1,
+        firstBreachTimestamp: timestamp,
+        peakBins: [spectral.peakBinIndex],
+      });
+      return null;
+    }
 
     candidate.consecutiveCount += 1;
     candidate.peakBins.push(spectral.peakBinIndex);
     this.breachCandidates.set(device_id, candidate);
 
-    // Filter Condition 1: Check Temporal Persistence
-    if (candidate.consecutiveCount < this.REQUIRED_CONSECUTIVE_BREACHES) {
-      // Suppress alert until breach proves sustained (under 300 ms)
+    const requiredFrames =
+      activeBreachType === "LOWER"
+        ? this.CONSECUTIVE_LOWER_BREACHES
+        : this.CONSECUTIVE_UPPER_BREACHES;
+
+    if (candidate.consecutiveCount < requiredFrames) {
       return null;
     }
 
-    // Filter Condition 2: Harmonic Carrier Stability (for Narrowband Shimmers)
-    // If breach was triggered by a narrowband spike, verify the harmonic bin didn't bounce
     if (isNarrowbandUpperBreach) {
-      const recentBins = candidate.peakBins.slice(-this.REQUIRED_CONSECUTIVE_BREACHES);
+      const recentBins = candidate.peakBins.slice(-this.CONSECUTIVE_UPPER_BREACHES);
       const isCarrierStable = recentBins.every((bin) => bin === recentBins[0]);
-
       if (!isCarrierStable) {
-        // Frequency hopped between bins during the burst -> transient wideband emitter/phone
         this.breachCandidates.delete(device_id);
         return null;
       }
     }
 
     // -------------------------------------------------------------
-    // ATTACK CONFIRMED: TRANSITION SECURE -> COMPROMISED
+    // SUSTAINED ATTACK CONFIRMED: TRANSITION SECURE -> COMPROMISED
     // -------------------------------------------------------------
     this.terminalStates.set(device_id, "COMPROMISED");
     this.breachCandidates.delete(device_id);
     this.recoveryTimestamps.delete(device_id);
 
-    // 5. Extract forensic metrics
-    const rssiVals = series.map((s) => s.rssi);
-    const meanRssi = rssiVals.reduce((acc, val) => acc + val, 0) / rssiVals.length;
-    const variance =
-      rssiVals.reduce((acc, val) => acc + Math.pow(val - meanRssi, 2), 0) /
-      rssiVals.length;
+    // Extract metrics from the active breach window
+    const activeSliceCount = activeBreachType === "LOWER" ? this.CONSECUTIVE_LOWER_BREACHES : 3;
+    const activeSlice = series.slice(-activeSliceCount);
+    const activeRssiVals = activeSlice.map((s) => s.rssi);
+    const activeMeanRssi = activeRssiVals.reduce((a, b) => a + b, 0) / activeRssiVals.length;
+    const activeVariance =
+      activeRssiVals.reduce((acc, val) => acc + Math.pow(val - activeMeanRssi, 2), 0) /
+      activeRssiVals.length;
 
+    const allRssiVals = series.map((s) => s.rssi);
     const intervals: number[] = [];
     for (let i = 1; i < series.length; i++) {
       intervals.push(Math.round((series[i].t - series[i - 1].t) * 1000));
@@ -279,7 +358,7 @@ class POSSignalTracker {
     const intervalStdDev = Math.sqrt(intervalVariance);
 
     const durationSec = series[series.length - 1].t - series[0].t;
-    const effectivePowerDbm = Math.max(currentMeanRssi, spectral.peakBinPower);
+    const effectivePowerDbm = Math.max(activeMeanRssi, spectral.peakBinPower);
     const deltaDb = Number((effectivePowerDbm - this.P_MAX).toFixed(2));
     const powerSurgeRatio =
       deltaDb > 0 ? Number(Math.pow(10, deltaDb / 10).toFixed(1)) : 1.0;
@@ -287,7 +366,7 @@ class POSSignalTracker {
     let likelyType: ThreatType = "FALSE_POSITIVE";
     if (isLowerBreach) {
       likelyType = "COMMUNICATION_JAMMING";
-    } else if (variance > 14.0 && !spectral.isNarrowbandSpike) {
+    } else if (activeVariance > 14.0 && !spectral.isNarrowbandSpike) {
       likelyType = "FALSE_POSITIVE";
     } else if (spectral.isNarrowbandSpike && effectivePowerDbm >= this.P_MAX) {
       likelyType = "SNIFFING_TAP";
@@ -303,10 +382,11 @@ class POSSignalTracker {
       metrics: {
         deviceId: device_id,
         sampleCount: series.length,
-        meanRssi: Number(currentMeanRssi.toFixed(2)),
-        variance: Number(variance.toFixed(2)),
-        minRssi: Math.min(...rssiVals),
-        maxRssi: Math.max(...rssiVals),
+        meanRssi: Number(activeMeanRssi.toFixed(2)),
+        variance: Number(activeVariance.toFixed(2)),
+        minRssi: Math.min(...allRssiVals),
+        maxRssi: Math.max(...allRssiVals),
+        isAttenuationBreach: isLowerBreach,
         medianIntervalMs: medianInterval,
         intervalStdDevMs: Math.round(intervalStdDev),
         durationSec: Number(durationSec.toFixed(2)),
@@ -338,8 +418,30 @@ export function createFallbackVerdict(
   threat: ThreatType,
   deltaDb: number,
   powerSurge: number,
-  spectral?: SpectralAnalysis
+  spectral?: SpectralAnalysis,
+  isAttenuationBreach?: boolean // Added: Parameter to support lower-bound routing
 ): AgentVerdict {
+  if (isAttenuationBreach) {
+    return {
+      threat_type: "COMMUNICATION_JAMMING",
+      compromised_vector: "Physical Chassis Perimeter / Ambient Mesh Sensor",
+      risk_level: "HIGH",
+      risk_justification:
+        "Severe physical RF suppression detected (< -82.0 dBm); indicates Faraday shielding or severed antenna trace violating PCI DSS v4.0 Req 9.9 tamper monitoring.",
+      pci_containment_action:
+        "Isolate terminal from network routing, invalidate cryptographic session keys, and dispatch security technician for chassis inspection.",
+      action: "ISOLATE_OFFLINE",
+      confidence: 0.94,
+      threat_diagnosis: [
+        "Sustained RF attenuation collapse below -82.0 dBm baseline bound",
+        "Probable conductive foil wrapping or enclosure tamper",
+        "Receiver front-end blinding to suppress physical tamper telemetry",
+      ],
+      rationale:
+        "Physical RF attenuation collapsed below -82.0 dBm threshold, indicating conductive shielding or antenna severance.",
+    };
+  }
+
   const peakBinStr = spectral
     ? `Bin ${spectral.peakBinIndex} @ ${spectral.peakBinPower} dBm (+${spectral.spectralSpreadDb} dB spread)`
     : "48.78 MHz Harmonic";
@@ -357,9 +459,9 @@ export function createFallbackVerdict(
       action: "LOCK_TERMINAL",
       confidence: 0.98,
       threat_diagnosis: [
-        "Parasitic transmitter coupling detected on smart card I/O bus lines[cite: 1, 4]",
-        "EMV chip slot physical trace tapped via invasive shimmer overlay[cite: 1]",
-        `Observed +${deltaDb} dB surge (~${powerSurge}x baseline power) concentrated on ${peakBinStr}[cite: 7]`,
+        "Parasitic transmitter coupling detected on smart card I/O bus lines",
+        "EMV chip slot physical trace tapped via invasive shimmer overlay",
+        `Observed +${deltaDb} dB surge (~${powerSurge}x baseline power) concentrated on ${peakBinStr}`,
       ],
       rationale: `Upper RF bound breach detected (+${deltaDb} dB / ~${powerSurge}x power surge). Parasitic transmitter coupling on smart card I/O bus lines.`,
     };
@@ -368,7 +470,7 @@ export function createFallbackVerdict(
   if (threat === "DATA_EXFIL_BEACON") {
     return {
       threat_type: "DATA_EXFIL_BEACON",
-      compromised_vector: "433 MHz / 2.4 GHz Secondary Transmitter Trace[cite: 2]",
+      compromised_vector: "433 MHz / 2.4 GHz Secondary Transmitter Trace",
       risk_level: "HIGH",
       risk_justification:
         "Periodic automated packet offload detected; violating PCI DSS v4.0 Req 9.9 physical tamper monitoring requirements.",
@@ -417,7 +519,7 @@ export function createFallbackVerdict(
     action: "IGNORE",
     confidence: 0.95,
     threat_diagnosis: [
-      "High power variance consistent with passing mobile phone[cite: 8]",
+      "High power variance consistent with passing mobile phone",
       "Non-periodic, transient RF spike",
       "No sustained parasite coupling on internal traces",
     ],
@@ -430,44 +532,54 @@ export function createFallbackVerdict(
 // ---------------------------------------------------------------------------
 
 async function evaluateWithAgent(metrics: WindowMetrics): Promise<AgentVerdict> {
-  const isAttenuationBreach = metrics.meanRssi < -82.0;
+  const isAttenuationBreach = metrics.isAttenuationBreach;
 
-  const systemPrompt = `You are an automated PCI PTS (PIN Transaction Security) v6.0 and PCI DSS v4.0 Hardware Forensics Engine integrated into Akamai Cloud.
-You analyze physical-layer RF side-channel anomalies captured by Software-Defined Radios monitoring EMV Point-of-Sale terminals.
+  const systemPrompt = `You are an elite PCI Security Specialist, Embedded Hardware Forensics Expert, and automated RF Physical-Layer Diagnostics Engine hosted on Akamai Cloud.
+You analyze Software-Defined Radio (SDR) side-channel RF emissions captured from EMV Point-of-Sale (POS) terminals to detect physical tampering, parasitic shimmers, rogue taps, Faraday shielding, and wireless jamming.
 
-Your output MUST be strictly deterministic, highly technical, and adhere strictly to PCI PTS Module 1 and PCI DSS Req 9.9 standards.
-Do NOT provide generic conversational filler.
+Your objective is to provide a rigorous, highly technical forensic assessment grounded in ISO/IEC 7816-3 protocols, analog RF side-channel physics, PCI PTS v6.0 Module 1, and PCI DSS v4.0 Requirement 9.9.
 
-Respond in strict JSON matching this structure:
+Provide thorough, technically descriptive explanations of the root cause, coupling mechanisms, and hardware attack surface. Do not artificially abbreviate your technical reasoning. Avoid generic conversational greetings or conversational filler.
+
+Respond ONLY with valid JSON matching this exact schema:
 {
   "threat_type": "SNIFFING_TAP" | "DATA_EXFIL_BEACON" | "COMMUNICATION_JAMMING" | "FALSE_POSITIVE",
   "confidence": 0.0 - 1.0,
-  "compromised_vector": "ISO/IEC 7816-3 Smart Card Interface" | "Physical Chassis Perimeter / Ambient Mesh Sensor" | "SPI/UART Data Bus",
+  "compromised_vector": "ISO/IEC 7816-3 Smart Card Interface" | "Physical Chassis Perimeter / Ambient Mesh Sensor" | "SPI/UART Data Bus" | "External Ambient Environment",
   "risk_level": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
-  "risk_justification": "1-sentence justification citing CVSS or PCI DSS 9.9 impact",
-  "pci_containment_action": "Immediate automated remediation referencing TR-31/DUKPT key zeroization, transaction token revocation, or terminal quarantine",
+  "risk_justification": "Detailed justification evaluating CVSS impact, plaintext credential exposure (Track-2 equivalent data, offline PIN), and breach of PCI physical tamper boundaries.",
+  "pci_containment_action": "Comprehensive containment directives specifying immediate hardware and acquirer actions (e.g., TR-31 / DUKPT Future Key zeroization, transaction cryptogram ARQC invalidation, gateway token quarantine, or physical terminal decommission).",
   "action": "LOCK_TERMINAL" | "ISOLATE_OFFLINE" | "FLAG_FOR_INSPECTION" | "IGNORE",
   "threat_diagnosis": [
-    "Root-cause RF mechanism identified",
-    "Target subsystem affected",
-    "Physical attacker proximity or hardware signature"
+    "Root-cause physical/RF anomaly mechanism (carrier frequency, harmonic power, capacitive/inductive coupling)",
+    "Targeted cryptographic, bus, or transaction subsystem affected",
+    "Physical attacker proximity, implant footprint, or rogue hardware signature"
   ],
-  "rationale": "Direct 1-2 sentence technical summary of the physical RF anomaly."
-}`;
+  "forensic_analysis": "Comprehensive technical breakdown of the physical side-channel emission. Explain how the observed spectral spread, harmonic surge, and signal persistence map to the hardware exploit, whether capacitive contact sniffing, rogue wireless offloading, or Faraday attenuation.",
+  "pci_compliance_impact": "Direct analysis of non-compliance under PCI PTS v6.0 (Section B1/B2) and PCI DSS v4.0 (Req 9.9 tamper detection obligations).",
+  "rationale": "Concise executive forensic summary combining the physical observation with the primary threat conclusion."
+}
+  CRITICAL OUTPUT CONSTRAINT:
+- Output MUST be valid, raw RFC 8259 JSON starting with '{' and ending with '}'.
+- Do NOT wrap output in markdown code blocks (NO \`\`\` or \`\`\`json fences).
+- Do NOT include any introductory or concluding text.
+- Do NOT use raw unescaped newlines inside JSON string values.`;
 
-  const userContext = `TELEMETRY EVENT CONTEXT:
+  const userContext = `HARDWARE TELEMETRY EVENT CONTEXT:
 - Terminal Identifier: ${metrics.deviceId}
-- Detection Method: Physical-Layer RF Spectral Analysis (RTL-SDR R820T2)
-- 8-Point FFT Spectral Profile (dBm): [${metrics.spectral.bins.join(", ")}]
-- Observed Wideband Power: ${metrics.meanRssi} dBm (Peak: ${metrics.maxRssi} dBm, Variance: ${metrics.variance} dBm²)
-- Anomaly Vector: ${
+- Detection Sensor: RTL-SDR Physical-Layer RF Monitor (R820T2)
+- 8-Point Downsampled FFT Spectrum (dBm): [${metrics.spectral.bins.join(", ")}]
+- Dominant Harmonic: Bin ${metrics.spectral.peakBinIndex} @ ${metrics.spectral.peakBinPower} dBm (+${metrics.spectral.spectralSpreadDb} dB spectral spread over noise floor)
+- Narrowband Spike Status: ${metrics.spectral.isNarrowbandSpike ? "CONFIRMED (>= 18.0 dB isolation)" : "NEGATIVE (Wideband or diffuse)"}
+- Active Channel Power (RSSI): ${metrics.meanRssi} dBm (Active Variance: ${metrics.variance} dBm²)
+- Anomaly Classification Vector: ${
     isAttenuationBreach
-      ? `LOWER BOUND BREACH (P_RF < P_min of -82.0 dBm). Signal dropped to ${metrics.meanRssi} dBm. Indicates physical RF shielding (Faraday enclosure) or severed antenna trace attempting to blind tamper detection.`
-      : `UPPER BOUND BREACH (P_RF > P_max of -38.0 dBm). Delta: +${metrics.deltaDb} dB / ~${metrics.powerSurgeRatio}x power surge on 48.78 MHz harmonic.`
+      ? `LOWER ATTENUATION BREACH (P_RF < P_min of -82.0 dBm). Signal collapsed to ${metrics.meanRssi} dBm across all bins. Indicates physical Faraday enclosure, copper tape foil wrap, or severed chassis antenna trace attempting to blind physical tamper monitoring.`
+      : `UPPER HARMONIC BREACH (P_RF > P_max of -38.0 dBm). Effective Surge: +${metrics.deltaDb} dB (~${metrics.powerSurgeRatio}x power multiplier relative to P_max threshold).`
   }
-- Sensor State: ISO/IEC 7816 bus active during card insertion
-- Window Duration: ${metrics.durationSec}s (${metrics.sampleCount} samples)
-- Preliminary Heuristic: ${metrics.likelyType}`;
+- Target Bus Active: ISO/IEC 7816-3 contact lines (EMV Smart Card Slot)
+- Sustained Window Duration: ${metrics.durationSec}s (${metrics.sampleCount} total samples)
+- Heuristic Pre-Classifier: ${metrics.likelyType}`;
 
   const targetUrl =
     process.env.AGENT_ENDPOINT_URL || "https://api.linode.com/v4/ai/inference";
@@ -487,15 +599,19 @@ Respond in strict JSON matching this structure:
           { role: "system", content: systemPrompt },
           { role: "user", content: userContext },
         ],
-        temperature: 0.1,
-        max_tokens: 350,
+        temperature: 0.15,
+        max_tokens: 1800,
         response_format: { type: "json_object" },
       }),
     });
 
     if (res.ok) {
       const data = await res.json();
-      const rawText: string = data.choices?.[0]?.message?.content ?? data.response;
+      let rawText: string = data.choices?.[0]?.message?.content ?? data.response;
+      rawText = rawText.trim();
+      if (rawText.startsWith("```")) {
+        rawText = rawText.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+      }
       const parsed = JSON.parse(rawText) as AgentVerdict;
 
       return {
@@ -517,7 +633,8 @@ Respond in strict JSON matching this structure:
     metrics.likelyType,
     metrics.deltaDb,
     metrics.powerSurgeRatio,
-    metrics.spectral
+    metrics.spectral,
+    isAttenuationBreach
   );
 }
 
@@ -529,17 +646,78 @@ const dev = process.env.NODE_ENV !== "production";
 const app = next({ dev });
 const handle = app.getRequestHandler();
 const PORT = parseInt(process.env.PORT || "3000", 10);
+const ADMIN_API_KEY = process.env.RF_SENTINEL_ADMIN_KEY || "adm_rf_secret_dev";
 
 await app.prepare();
 
 Bun.serve<WSData>({
   port: PORT,
 
-  // 1. HTTP Router & WebSocket Upgrader
   async fetch(req, server) {
     const url = new URL(req.url);
 
-    // Hardware Ingestion Socket (/ingest)[cite: 7]
+    // Administrative Lockout Override Endpoint
+    if (url.pathname === "/api/terminal/reset" && req.method === "POST") {
+      const authHeader = req.headers.get("authorization");
+      if (!authHeader || authHeader !== `Bearer ${ADMIN_API_KEY}`) {
+        return new Response(JSON.stringify({ error: "Unauthorized" }), {
+          status: 401,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      let body: { deviceId?: string };
+      try {
+        body = await req.json();
+      } catch {
+        return new Response(JSON.stringify({ error: "Malformed JSON payload" }), {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      const { deviceId } = body;
+      if (!deviceId) {
+        return new Response(JSON.stringify({ error: "Missing required field: deviceId" }), {
+          status: 422,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+
+      tracker.manualReset(deviceId);
+
+      const [record] = await db
+        .insert(incidentVerdicts)
+        .values({
+          deviceId,
+          classification: "ADMINISTRATIVE_OVERRIDE",
+          confidence: 1.0,
+          meanRssi: -60.0,
+          variance: 0.0,
+          sampleCount: 0,
+          rationale: "Terminal locked state cleared via manual administrative override endpoint.",
+          actionTaken: "MANUAL_UNLOCK",
+          rawSeries: JSON.stringify({ overrideBy: "ADMIN_CONSOLE", timestamp: Date.now() / 1000 }),
+        })
+        .returning();
+
+      const resetPayload = JSON.stringify({
+        event: "STATUS_RECOVERED",
+        incidentId: record.id,
+        deviceId,
+        status: "SECURE",
+        timestamp: Date.now() / 1000,
+      });
+
+      server.publish("dashboard-feed", resetPayload);
+
+      return new Response(
+        JSON.stringify({ status: "OK", incidentId: record.id, timestamp: Date.now() / 1000 }),
+        { status: 200, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    // Hardware Ingestion Socket (/ingest)
     if (url.pathname === "/ingest") {
       const upgraded = server.upgrade(req, {
         data: { type: "INGEST", connectedAt: Date.now() },
@@ -548,7 +726,7 @@ Bun.serve<WSData>({
       return new Response("WebSocket Upgrade Failed (/ingest)", { status: 400 });
     }
 
-    // Dashboard Telemetry Egress Socket (/egress)[cite: 4, 5]
+    // Dashboard Telemetry Egress Socket (/egress)
     if (url.pathname === "/egress") {
       const upgraded = server.upgrade(req, {
         data: { type: "EGRESS", connectedAt: Date.now() },
@@ -641,7 +819,6 @@ Bun.serve<WSData>({
     });
   },
 
-  // 2. High-Throughput uWebSockets Engine
   websocket: {
     open(ws: ServerWebSocket<WSData>) {
       if (ws.data.type === "EGRESS") {
@@ -649,113 +826,147 @@ Bun.serve<WSData>({
       }
     },
 
-    // server.ts (websocket.message snippet)
-async message(ws: ServerWebSocket<WSData>, message: string | Buffer) {
-  if (ws.data.type !== "INGEST") return;
+    async message(ws: ServerWebSocket<WSData>, message: string | Buffer) {
+      if (ws.data.type !== "INGEST") return;
 
-  try {
-    const raw: RawHardwarePayload = JSON.parse(message.toString());
-    const payload = parseHardwarePayload(raw);
+      try {
+        const raw: RawHardwarePayload = JSON.parse(message.toString());
+        const payload = parseHardwarePayload(raw);
 
-    if (!payload) {
-      console.warn("[Ingest] Dropped invalid packet missing device_id, timestamp, or spectrum");
-      return;
-    }
+        if (!payload) {
+          return;
+        }
 
-    ws.data.deviceId = payload.device_id;
+        ws.data.deviceId = payload.device_id;
 
-    // Stream normalized telemetry and 8-point FFT to dashboard egress
-    ws.publish(
-      "dashboard-feed",
-      JSON.stringify({
-        event: "TELEMETRY_POINT",
-        device_id: payload.device_id,
-        rssi: payload.rssi,
-        fft: payload.fft,
-        timestamp: payload.timestamp,
-      })
-    );
+        // Broadcast standardized telemetry point to dashboard egress
+        ws.publish(
+          "dashboard-feed",
+          JSON.stringify({
+            event: "TELEMETRY_POINT",
+            device_id: payload.device_id,
+            rssi: payload.rssi,
+            fft: payload.fft,
+            timestamp: payload.timestamp,
+          })
+        );
 
-    // Run state-latched threshold and spectral analysis
-    const result = tracker.processReading(payload);
-    if (!result) return;
+        const result = tracker.processReading(payload);
+        if (!result) return;
 
-    if (result.kind === "RECOVERED") {
-      console.log(`[STATUS RESTORED] Terminal: ${result.deviceId} recovered.`);
-      const [recoveryRecord] = await db
-        .insert(incidentVerdicts)
-        .values({
-          deviceId: result.deviceId,
-          classification: "SECURE_RECOVERED",
-          confidence: 1.0,
-          meanRssi: payload.rssi,
-          variance: 0.0,
-          sampleCount: 0,
-          rationale: "RF physical emissions stabilized at safe baseline for > 2.0s.",
-          actionTaken: "RESTORE_NORMAL",
-          rawSeries: JSON.stringify([]),
-        })
-        .returning();
+        // -------------------------------------------------------------
+        // BRANCH 1: RECOVERY DETECTED -> PERSIST TO DB
+        // -------------------------------------------------------------
+        if (result.kind === "RECOVERED") {
+          console.log("\n=======================================================");
+          console.log(`[STATUS RESTORED] Terminal: ${result.deviceId}`);
+          console.log(`Signal stabilized within safe baseline for > 2.0s.`);
+          console.log(`Writing RECOVERY record to PostgreSQL...`);
+          console.log("=======================================================\n");
 
-      const recoveryPayload = JSON.stringify({
-        event: "STATUS_RECOVERED",
-        incidentId: recoveryRecord.id,
-        deviceId: result.deviceId,
-        status: "SECURE",
-        timestamp: result.recoveryTimestamp,
-      });
+          const [recoveryRecord] = await db
+            .insert(incidentVerdicts)
+            .values({
+              deviceId: result.deviceId,
+              classification: "SECURE_RECOVERED",
+              confidence: 1.0,
+              meanRssi: payload.rssi,
+              variance: 0.0,
+              sampleCount: 0,
+              rationale:
+                "RF physical emissions stabilized within safe baseline bounds for > 2.0s. Terminal unlocked.",
+              actionTaken: "RESTORE_NORMAL",
+              rawSeries: JSON.stringify([]),
+            })
+            .returning();
 
-      ws.publish("dashboard-feed", recoveryPayload);
-      ws.send(recoveryPayload);
-      return;
-    }
+          const recoveryPayload = JSON.stringify({
+            event: "STATUS_RECOVERED",
+            incidentId: recoveryRecord.id,
+            deviceId: result.deviceId,
+            status: "SECURE",
+            timestamp: result.recoveryTimestamp,
+          });
 
-    // Branch 2: Threat Alert
-    const metrics = result.metrics!;
-    console.log(`\n[ALERT TRIGGERED] Terminal: ${metrics.deviceId} | RSSI: ${metrics.meanRssi} dBm`);
-    console.log(`8-Point FFT: [${metrics.spectral.bins.join(", ")}] dBm`);
+          ws.publish("dashboard-feed", recoveryPayload);
+          ws.send(recoveryPayload);
+          return;
+        }
 
-    const verdict = await evaluateWithAgent(metrics);
+        // -------------------------------------------------------------
+        // BRANCH 2: THREAT ALERT -> EVALUATE & PERSIST TO DB
+        // -------------------------------------------------------------
+        const metrics = result.metrics;
 
-    console.log("\n---------------- AGENT FORENSIC REPORT ----------------");
-    console.log(`Threat Classification:  ${verdict.threat_type}`);
-    console.log(`Compromised Vector:     ${verdict.compromised_vector}`);
-    console.log(
-      `Risk Level:             ${verdict.risk_level} (${(verdict.confidence * 100).toFixed(1)}% Confidence)`
-    );
-    console.log(`PCI Containment Action: ${verdict.pci_containment_action}`);
-    console.log(`Physical Relay Action:  ${verdict.action}`);
-    console.log("=======================================================\n");
+        console.log("\n=======================================================");
+        console.log(`[ALERT TRIGGERED] Terminal: ${metrics.deviceId}`);
+        console.log(
+          `Window: ${metrics.sampleCount} samples | Mean: ${metrics.meanRssi} dBm | Variance: ${metrics.variance} dBm²`
+        );
+        console.log(`8-Point FFT: [${metrics.spectral.bins.join(", ")}] dBm`);
+        console.log(
+          `Dominant Harmonic: Bin ${metrics.spectral.peakBinIndex} @ ${metrics.spectral.peakBinPower} dBm (+${metrics.spectral.spectralSpreadDb} dB spread)`
+        );
+        console.log(
+          `RF Harmonic Surge: +${metrics.deltaDb} dB (~${metrics.powerSurgeRatio}x power)`
+        );
+        console.log(`Pre-Heuristic: ${metrics.likelyType}`);
+        console.log("Invoking Akamai Hosted AI Forensics Engine...");
 
-    const [record] = await db
-      .insert(incidentVerdicts)
-      .values({
-        deviceId: metrics.deviceId,
-        classification: verdict.threat_type,
-        confidence: verdict.confidence,
-        meanRssi: metrics.meanRssi,
-        variance: metrics.variance,
-        sampleCount: metrics.sampleCount,
-        rationale: verdict.rationale,
-        actionTaken: verdict.action,
-        rawSeries: JSON.stringify(metrics.rawSeries),
-      })
-      .returning();
+        const verdict = await evaluateWithAgent(metrics);
 
-    const alertPayload = JSON.stringify({
-      event: "INCIDENT_ALERT",
-      incidentId: record.id,
-      deviceId: metrics.deviceId,
-      verdict,
-    });
+        console.log("\n---------------- AGENT FORENSIC REPORT ----------------");
+        console.log(`Threat Classification:  ${verdict.threat_type}`);
+        console.log(`Compromised Vector:     ${verdict.compromised_vector}`);
+        console.log(
+          `Risk Level:             ${verdict.risk_level} (${(verdict.confidence * 100).toFixed(1)}% Confidence)`
+        );
+        console.log(`PCI Containment Action: ${verdict.pci_containment_action}`);
+        console.log(`Physical Relay Action:  ${verdict.action}`);
+        if (verdict.threat_diagnosis?.length) {
+          console.log("\nThreat Diagnosis:");
+          verdict.threat_diagnosis.forEach((point, idx) => {
+            console.log(`  ${idx + 1}. ${point}`);
+          });
+        }
+        if (verdict.forensic_analysis) {
+          console.log(`\nForensic Analysis:\n${verdict.forensic_analysis}`);
+        }
+        if (verdict.pci_compliance_impact) {
+          console.log(`\nPCI Compliance Impact:\n${verdict.pci_compliance_impact}`);
+        }
+        console.log(`\nTechnical Rationale:    ${verdict.rationale}`);
+        console.log("=======================================================\n");
 
-    ws.publish("dashboard-feed", alertPayload);
-    ws.send(alertPayload);
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : "Unknown error";
-    console.error("[Telemetry Ingest Error]:", msg);
-  }
-},
+        const [record] = await db
+          .insert(incidentVerdicts)
+          .values({
+            deviceId: metrics.deviceId,
+            classification: verdict.threat_type,
+            confidence: verdict.confidence,
+            meanRssi: metrics.meanRssi,
+            variance: metrics.variance,
+            sampleCount: metrics.sampleCount,
+            rationale: verdict.rationale,
+            actionTaken: verdict.action,
+            rawSeries: JSON.stringify(metrics.rawSeries),
+          })
+          .returning();
+
+        const alertPayload = JSON.stringify({
+          event: "INCIDENT_ALERT",
+          incidentId: record.id,
+          deviceId: metrics.deviceId,
+          verdict,
+        });
+
+        ws.publish("dashboard-feed", alertPayload);
+        ws.send(alertPayload);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Unknown error";
+        console.error("[Telemetry Ingest Error]:", msg);
+      }
+    },
 
     close(ws: ServerWebSocket<WSData>) {
       if (ws.data.type === "EGRESS") {
@@ -766,5 +977,5 @@ async message(ws: ServerWebSocket<WSData>, message: string | Buffer) {
 });
 
 console.log(`> Bun runtime active on http://localhost:${PORT}`);
-console.log(`> Telemetry Ingest: ws://localhost:${PORT}/ingest[cite: 7]`);
-console.log(`> Dashboard Egress: ws://localhost:${PORT}/egress[cite: 4, 5]`);
+console.log(`> Telemetry Ingest: ws://localhost:${PORT}/ingest`);
+console.log(`> Dashboard Egress: ws://localhost:${PORT}/egress`);

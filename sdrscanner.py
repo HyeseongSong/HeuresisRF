@@ -1,10 +1,11 @@
 import ctypes
 import time
+import json
+import asyncio
 import numpy as np
 
 # ==============================================================================
-# COMPATIBILITY SHIM: Prevent crashes on older rtlsdr.dll builds
-# Catches missing DLL functions (bias_tee, dithering) and stubs them safely.
+# COMPATIBILITY SHIM (Keep intact)
 # ==============================================================================
 _orig_getitem = ctypes.CDLL.__getitem__
 
@@ -12,50 +13,58 @@ def _safe_getitem(self, name):
     try:
         return _orig_getitem(self, name)
     except AttributeError:
-        # Return a dummy callable function that returns 0 (success)
         return ctypes.CFUNCTYPE(ctypes.c_int)(lambda *args, **kwargs: 0)
 
 ctypes.CDLL.__getitem__ = _safe_getitem
 # ==============================================================================
 
-# Now safe to import RtlSdr
 from rtlsdr import RtlSdr
+import websockets
+
+# ==============================================================================
+# CONFIGURATION: Set the URL of your cloud server
+# When your teammate gives you the Linode IP, change "localhost" to that IP:
+# e.g., "ws://192.0.2.1:8000/ws/edge"
+# ==============================================================================
+CLOUD_URL = "ws://localhost:8000/ws/edge"
+DEVICE_ID = "pos_terminal_01"
+
 
 def setup_sdr():
     sdr = RtlSdr()
     sdr.sample_rate = 2.048e6
-    sdr.center_freq = 48.78e6   # Centered on the clean band where your red cursor is
+    sdr.center_freq = 48.78e6   # Calibrated 48.78 MHz harmonic
     sdr.gain = 25.0             # Fixed gain
     return sdr
+
 
 def calculate_rssi(samples):
     """
     Computes peak spectral power using FFT (matching the SDR spectrum display).
     Ignores the DC center spike and measures the strongest tone in the band.
     """
-    # 1. Compute Fast Fourier Transform
     N = len(samples)
     fft_vals = np.fft.fftshift(np.fft.fft(samples))
     power_spectrum = (np.abs(fft_vals) / N) ** 2
     
-    # 2. Mask out the RTL-SDR hardware DC center spike (middle 50 bins)
     mid = N // 2
     power_spectrum[mid - 25 : mid + 25] = 0
 
-    # 3. Focus on a +/- 400 kHz window around 48.78 MHz (bins away from the 48.15 MHz hill)
-    # At sample_rate = 2.048 MHz, 400 kHz is roughly 20% of the bins around the center
     window = int(N * 0.2)
     roi_spectrum = power_spectrum[mid - window : mid + window]
 
-    # 4. Find the peak spike in that window
     peak_power = np.max(roi_spectrum)
     if peak_power < 1e-12:
         peak_power = 1e-12
 
-    # 5. Convert to calibrated dBm
     rssi_dbm = 10 * np.log10(peak_power) + 40.0
     return round(float(rssi_dbm), 2)
-def main():
+
+
+# ==============================================================================
+# NEW: Edge-to-Cloud Asynchronous Streaming Loop
+# ==============================================================================
+async def stream_to_cloud():
     print("[*] Initializing RTL-SDR receiver...")
     try:
         sdr = setup_sdr()
@@ -64,27 +73,48 @@ def main():
         return
 
     print("[*] RTL-SDR successfully connected!")
-    print("[*] Scanning baseline RF levels. Press Ctrl+C to terminate.")
-    print("-" * 55)
+    print(f"[*] Target Cloud Server: {CLOUD_URL}")
 
-    try:
-        while True:
-            # Read a batch of complex IQ samples
+    while True:
+        try:
+            print("[*] Attempting to connect to Cloud WebSocket...")
+            async with websockets.connect(CLOUD_URL) as ws:
+                print("[+] CONNECTED! Streaming live JSON packets to cloud...")
+                
+                while True:
+                    # 1. Capture IQ samples and compute dBm
+                    samples = sdr.read_samples(1024 * 16)
+                    rssi = calculate_rssi(samples)
+
+                    # 2. Package into the exact JSON schema required by backend & AI
+                    payload = {
+                        "device_id": DEVICE_ID,
+                        "rssi": rssi,
+                        "timestamp": time.time()
+                    }
+
+                    # 3. Transmit JSON over WebSocket
+                    await ws.send(json.dumps(payload))
+                    
+                    # Print locally so you can still monitor it
+                    print(f"[CLOUD TX] Sent: {json.dumps(payload)}")
+                    await asyncio.sleep(0.08)  # ~12 updates/sec
+
+        except (websockets.exceptions.ConnectionClosed, ConnectionRefusedError, OSError):
+            # If the backend is not running yet, don't crash!
+            # Sample locally and keep retrying connection every 2 seconds.
             samples = sdr.read_samples(1024 * 16)
             rssi = calculate_rssi(samples)
+            print(f"[LOCAL BACKUP] RSSI: {rssi:>6.2f} dBm | Cloud disconnected, retrying...")
+            await asyncio.sleep(2.0)
             
-            # Simple terminal visualizer bar
-            bar_length = max(0, int((rssi + 80) * 1.5))
-            bar = "#" * bar_length
-            
-            print(f"RSSI: {rssi:>6.2f} dBm | {bar}")
-            time.sleep(0.1)
+        except Exception as e:
+            print(f"[!] Error: {e}")
+            await asyncio.sleep(2.0)
 
-    except KeyboardInterrupt:
-        print("\n[*] Stopping SDR stream...")
-    finally:
-        sdr.close_device()
-        print("[*] SDR device closed cleanly.")
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(stream_to_cloud())
+    except KeyboardInterrupt:
+        print("\n[*] Stopping SDR stream...")

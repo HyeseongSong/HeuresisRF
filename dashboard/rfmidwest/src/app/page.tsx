@@ -1,43 +1,51 @@
-'use client'
+'use client';
 
 import { CartesianGrid, Legend, Line, LineChart, Tooltip, XAxis, YAxis } from 'recharts';
 
-export default function Home() {
+import { useSharedWebSocket } from '@/hooks/webSocketConnection';
 
-  const data = [
-    {
-      timestamp: 1728568800.12,
-      uv: -28,
-    },
-    {
-      timestamp: 1728568852.18,
-      uv: -22,
-    },
-    {
-      timestamp: 1728568867.52,
-      uv: -24,
-    },
-    {
-      timestamp: 1728568877.53,
-      uv: -20,
-    },
-    {
-      timestamp: 1728568888.41,
-      uv: -28,
-    },
-    {
-      timestamp: 1728568901.98,
-      uv: -32,
-    },
-    {
-      timestamp: 1728568921.85,
-      uv: -31,
-    },
-    {
-      timestamp: 1728568945.55,
-      uv: -22,
-    },
-  ];
+export default function Home() {
+  const { isConnected, lastMessage } = useSharedWebSocket();
+  const data = Object.entries(lastMessage?.spectrum).map(([key, value]) => ({
+    mhz: key,
+    rssi: value,
+  }));
+
+  // const data = [
+  //   {
+  //     mhz: 47.4,
+  //     rssi: -28,
+  //   },
+  //   {
+  //     mhz: 47.6,
+  //     rssi: -22,
+  //   },
+  //   {
+  //     mhz: 48,
+  //     rssi: -24,
+  //   },
+  //   {
+  //     mhz: 48.2,
+  //     rssi: -20,
+  //   },
+  //   {
+  //     mhz: 48.6,
+  //     rssi: -31,
+  //   },
+  //   {
+  //     mhz: 49.3,
+  //     rssi: -32,
+  //   },
+  //   {
+  //     mhz: 50.1,
+  //     rssi: -28,
+  //   },
+  //   {
+  //     mhz: 50.2,
+  //     rssi: -22,
+  //   },
+  // ];
+
   return (
     <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
       <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
@@ -113,10 +121,10 @@ export default function Home() {
           // }}
         >
           <CartesianGrid strokeDasharray="5 5" />
-          <Line dataKey="uv" strokeWidth={2} />
-          <XAxis dataKey="timestamp" />
-          <YAxis width="auto" label={{ position: 'insideLeft' }} />
-        </LineChart>
+          <Line dataKey="rssi" strokeWidth={2} activeDot={false} dot={false} isAnimationActive={false} />
+          <XAxis type='number' dataKey="mhz" domain={[47.2, 50.4]} unit='M' tickCount={16} />
+          <YAxis type='number' dataKey="rssi" width="auto" label={{ position: 'insideLeft' }} domain={[-100,0]} />
+        </LineChart> 
       </main>
     </div>
   );

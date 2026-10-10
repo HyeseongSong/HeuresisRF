@@ -12,6 +12,8 @@ import {
   RotateCcw,
   Sparkles
 } from 'lucide-react';
+import { useSharedWebSocket } from '@/hooks/webSocketConnection';
+
 
 export type TamperState = 'SECURE' | 'BREACH_UPPER' | 'BREACH_LOWER';
 
@@ -29,7 +31,7 @@ interface HeaderProps {
 export default function Header({
   status = 'SECURE',
   deviceId = 'pos_terminal_01',
-  isWsConnected = true,
+  isWsConnected = true, // remove
   currentRssi = -58.4,
   pMax = -55.0,
   pMin = -85.0,
@@ -37,6 +39,9 @@ export default function Header({
   onResetAlarm,
 }: HeaderProps) {
   const isAlarm = status !== 'SECURE';
+
+  const { isConnected, lastMessage } = useSharedWebSocket();
+  
 
   const getStatusBadge = () => {
     switch (status) {
@@ -135,11 +140,12 @@ export default function Header({
           <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300">
             <Cpu className="w-3.5 h-3.5 text-zinc-400" />
             <span className="text-zinc-500">TARGET:</span>
-            <span className="text-zinc-200 font-semibold">{deviceId}</span>
+            {/* <span className="text-zinc-200 font-semibold">{deviceId}</span> */}
+            <span className="text-zinc-200 font-semibold">{lastMessage.device_id}</span>
           </div>
 
           {/* Live RSSI Telemetry Pill */}
-          <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300">
+          {/* <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300">
             <span className="text-zinc-500">PWR:</span>
             <span className={`font-semibold ${
               currentRssi !== null && currentRssi > pMax 
@@ -150,6 +156,13 @@ export default function Header({
             }`}>
               {currentRssi !== null ? `${currentRssi.toFixed(1)} dBm` : '-- dBm'}
             </span>
+          </div> */}
+
+          {/* Live RSSI Timestamp Pill */}
+          <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300">
+            <span className="text-zinc-500">Timestamp:</span>
+            {/* <span className="text-zinc-200 font-semibold">Timestamp</span> */}
+            <span className="text-zinc-200 font-semibold">lastMessage.timestamp</span>
           </div>
 
           {/* Akamai Hosted Agent Pill */}
@@ -168,11 +181,13 @@ export default function Header({
 
           {/* WebSocket Ingestion Link */}
           <div className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border ${
-            isWsConnected 
+            // isWsConnected 
+            isConnected 
               ? 'bg-zinc-900 border-zinc-800 text-zinc-300' 
               : 'bg-rose-950/50 border-rose-800 text-rose-300'
           }`}>
-            {isWsConnected ? (
+            {/* {isWsConnected ? ( */}
+            {isConnected ? (
               <>
                 <Wifi className="w-3.5 h-3.5 text-emerald-400" />
                 <span className="text-zinc-500">GATEWAY:</span>

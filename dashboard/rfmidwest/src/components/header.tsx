@@ -188,7 +188,7 @@ export default function Header({
               <>
                 <Wifi className="w-3.5 h-3.5 text-emerald-400" />
                 <span className="text-zinc-500">GATEWAY:</span>
-                <span className="text-emerald-400 font-semibold">100ms LIVE</span>
+                <span className="text-emerald-400 font-semibold">LIVE</span>
               </>
             ) : (
               <>

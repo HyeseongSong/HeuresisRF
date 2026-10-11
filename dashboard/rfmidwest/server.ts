@@ -867,6 +867,9 @@ Bun.serve<WSData>({
     open(ws: ServerWebSocket<WSData>) {
       if (ws.data.type === "EGRESS") {
         ws.subscribe("dashboard-feed");
+        console.log("[WebSocket] Egress connection established.");
+      } else if (ws.data.type === "INGEST") {
+        console.log("[WebSocket] Ingest connection established.");
       }
     },
 
@@ -880,6 +883,7 @@ Bun.serve<WSData>({
         if (!payload) {
           return;
         }
+        console.log(`[Hardware Data] Received: ${JSON.stringify(payload)}`);
 
         ws.data.deviceId = payload.device_id;
 

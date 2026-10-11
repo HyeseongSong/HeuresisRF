@@ -31,17 +31,6 @@ interface HeaderProps {
   onResetAlarm?: () => void;
 }
 
-let secure = true; 
-let isAiAnalyzing = false;
-let formattedTimestamp = 'AWAITING';
-let statusConfig = {
-    title: 'SYSTEM SECURE // EM RUNTIME BOUNDS OK',
-    subtitle: 'Active SDR Physical Layer Monitoring',
-    bgColor: 'bg-emerald-950/60 border-emerald-500/70 text-emerald-200',
-    pulseColor: 'bg-emerald-400',
-    icon: <ShieldCheck className="w-5 h-5 text-emerald-400" />,
-  };
-
 export default function Header({
   // status = 'SECURE',
   // deviceId = 'pos_terminal_01',
@@ -57,6 +46,17 @@ export default function Header({
   useEffect(() => {
     setIsMounted(true);
   }, []);
+  const [secure, setSecure] = useState(false);
+  const [isAiAnalyzing, setIsAiAnalysing] = useState(false);
+  const [formattedTimestamp, setFormattedTimestamp] = useState('AWAITING');
+  const [statusConfig, setStatusConfig] = useState({
+    title: 'SYSTEM SECURE // EM RUNTIME BOUNDS OK',
+    subtitle: 'Active SDR Physical Layer Monitoring',
+    bgColor: 'bg-emerald-950/60 border-emerald-500/70 text-emerald-200',
+    pulseColor: 'bg-emerald-400',
+    icon: <ShieldCheck className="w-5 h-5 text-emerald-400" />,
+  });
+
 
   const { isConnected, lastMessage } = useSharedWebSocket();
 
@@ -67,36 +67,36 @@ export default function Header({
 
   switch (payload?.event) {
     case "TELEMETRY_POINT":
-      formattedTimestamp = isMounted && payload.timestamp 
+      setFormattedTimestamp(isMounted && payload.timestamp 
         ? new Date(payload.timestamp * 1000).toLocaleTimeString('en-US', {
             hour12: false,
             hour: '2-digit',
             minute: '2-digit',
             second: '2-digit',
           })
-        : 'AWAITING...';
+        : 'AWAITING...');
       break;
     case "HEURISTIC_ALERT_TRIGGERED":
-      secure = false;
-      isAiAnalyzing = true;
-      statusConfig = {
+      setSecure(false);
+      setIsAiAnalysing(true);
+      setStatusConfig({
         title: payload.heuristic.likelyType,
         subtitle: "Potential Incident Detected",
         bgColor: 'bg-amber-950/80 border-amber-500 text-amber-200',
         pulseColor: 'bg-amber-500',
         icon: <ShieldAlert className="w-5 h-5 text-amber-400 animate-bounce" />,
-      };
+      });
       break;
     case "INCIDENT_ALERT":
-      secure = false;
-      isAiAnalyzing = false;
-      statusConfig = {
+      setSecure(false);
+      setIsAiAnalysing(false);
+      setStatusConfig({
         title: payload.status,
         subtitle: "Threat Detected",
         bgColor: 'bg-amber-950/80 border-amber-500 text-amber-200',
         pulseColor: 'bg-amber-500',
         icon: <ShieldAlert className="w-5 h-5 text-amber-400 animate-bounce" />,
-      };
+      });
       break;
     case "INGEST_STATUS_CHANGE":
       if (payload.status == "ONLINE") {
@@ -107,13 +107,13 @@ export default function Header({
       break;
     case "STATUS_RECOVERED":
     default:
-      statusConfig = {
+      setStatusConfig({
         title: 'SYSTEM SECURE // EM RUNTIME BOUNDS OK',
         subtitle: 'Active SDR Physical Layer Monitoring',
         bgColor: 'bg-emerald-950/60 border-emerald-500/70 text-emerald-200',
         pulseColor: 'bg-emerald-400',
         icon: <ShieldCheck className="w-5 h-5 text-emerald-400" />,
-      };
+      });
   }
 
 

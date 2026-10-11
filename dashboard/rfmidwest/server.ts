@@ -1,7 +1,8 @@
 // server.ts
 import next from "next";
 import type { ServerWebSocket } from "bun";
-import { Readable, Writable } from "node:stream";
+import { IncomingMessage, ServerResponse } from "node:http";
+import { Socket } from "node:net";
 import { db } from "./lib/db";
 import { incidentVerdicts } from "./lib/schema";
 
@@ -70,7 +71,7 @@ export interface WindowMetrics {
   variance: number;
   minRssi: number;
   maxRssi: number;
-  isAttenuationBreach: boolean; // Added: Explicit physical attenuation flag
+  isAttenuationBreach: boolean;
   medianIntervalMs: number;
   intervalStdDevMs: number;
   durationSec: number;
@@ -117,7 +118,7 @@ export function parseHardwarePayload(raw: RawHardwarePayload): POSTelemetryPaylo
     return null;
   }
 
-  // Backward compatibility with legacy mock arrays
+  // Backward compatibility with legacy simulate.ts mock payloads
   if (typeof raw.rssi === "number" && Array.isArray(raw.fft)) {
     return {
       device_id: raw.device_id,
@@ -190,9 +191,11 @@ class POSSignalTracker {
   private readonly P_MIN = -82.0; 
   private readonly RECOVERY_REQUIRED_SEC = 2.0;
 
-  // Asymmetric persistence thresholds @ 10 Hz
-  private readonly CONSECUTIVE_UPPER_BREACHES = 3;  // 300 ms for active shimmer
-  private readonly CONSECUTIVE_LOWER_BREACHES = 12; // 1.2 s for shielding/tamper
+  // Asymmetric persistence thresholds @ 10 Hz:
+  // Upper bound (shimmer/tap): 3 frames (300 ms) -> Fast trip before ISO/IEC 7816 cryptogram finishes
+  private readonly CONSECUTIVE_UPPER_BREACHES = 3;
+  // Lower bound (Faraday/severed trace): 12 frames (1.2 s) -> Rejects passing metal carts and nulls
+  private readonly CONSECUTIVE_LOWER_BREACHES = 12;
 
   private analyzeFFT(fft: number[]): SpectralAnalysis {
     const bins = Array.isArray(fft) && fft.length === 8 ? fft : Array(8).fill(-65.0);
@@ -227,7 +230,7 @@ class POSSignalTracker {
     const { device_id, rssi, timestamp } = payload;
     const cutoff = timestamp - this.WINDOW_SECONDS;
 
-    // 1. Sliding ring buffer
+    // 1. Sliding ring buffer maintenance
     let series = this.windows.get(device_id) ?? [];
     series = series.filter((pt) => pt.t >= cutoff);
     series.push({ t: timestamp, rssi });
@@ -243,7 +246,7 @@ class POSSignalTracker {
     const currentMeanRssi =
       recentRssiVals.reduce((acc, val) => acc + val, 0) / recentRssiVals.length;
 
-    // 3. Spectral analysis
+    // 3. Spectral analysis (8 macro-bins)
     const spectral = this.analyzeFFT(payload.fft);
 
     // 4. Dual-trigger bounds evaluation
@@ -282,7 +285,7 @@ class POSSignalTracker {
     }
 
     // -------------------------------------------------------------
-    // TRANSIENT FILTERING (While SECURE)
+    // TRANSIENT SPIKE / NULL FILTERING (While SECURE)
     // -------------------------------------------------------------
     if (!isBreached) {
       this.breachCandidates.delete(device_id);
@@ -419,7 +422,7 @@ export function createFallbackVerdict(
   deltaDb: number,
   powerSurge: number,
   spectral?: SpectralAnalysis,
-  isAttenuationBreach?: boolean // Added: Parameter to support lower-bound routing
+  isAttenuationBreach?: boolean
 ): AgentVerdict {
   if (isAttenuationBreach) {
     return {
@@ -528,6 +531,68 @@ export function createFallbackVerdict(
 }
 
 // ---------------------------------------------------------------------------
+// Forensic Response Sanitizer & Repair Pipeline
+// ---------------------------------------------------------------------------
+
+function safeParseAgentResponse(rawText: string): AgentVerdict | null {
+  if (!rawText || typeof rawText !== "string") return null;
+
+  // 1. Strip markdown fences if present
+  let cleaned = rawText.trim();
+  if (cleaned.startsWith("```")) {
+    cleaned = cleaned.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  }
+
+  // 2. Direct JSON attempt
+  try {
+    return JSON.parse(cleaned) as AgentVerdict;
+  } catch {
+    // Continue to repair attempts
+  }
+
+  // 3. Attempt repairing unescaped newlines within JSON string values
+  try {
+    const sanitized = cleaned.replace(/[\r\n]+/g, " ");
+    return JSON.parse(sanitized) as AgentVerdict;
+  } catch {
+    // Continue to truncated repair
+  }
+
+  // 4. Repair truncated JSON (Unterminated string / unclosed brackets)
+  try {
+    let repair = cleaned.trim();
+
+    // Check if cut off inside a string (odd number of unescaped quotes)
+    const quoteMatches = repair.match(/(?<!\\)"/g) || [];
+    if (quoteMatches.length % 2 !== 0) {
+      repair += '"';
+    }
+
+    // Balance unclosed brackets and braces
+    const openBraces = (repair.match(/{/g) || []).length;
+    const closeBraces = (repair.match(/}/g) || []).length;
+    for (let i = 0; i < openBraces - closeBraces; i++) {
+      repair += "}";
+    }
+
+    const openBrackets = (repair.match(/\[/g) || []).length;
+    const closeBrackets = (repair.match(/]/g) || []).length;
+    for (let i = 0; i < openBrackets - closeBrackets; i++) {
+      repair += "]";
+    }
+
+    const repairedObj = JSON.parse(repair);
+    if (repairedObj && typeof repairedObj === "object" && repairedObj.threat_type) {
+      return repairedObj as AgentVerdict;
+    }
+  } catch {
+    console.warn("[Agent] JSON auto-repair failed. Raw snippet:", cleaned.slice(-120));
+  }
+
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Akamai Cloud Inference Integration
 // ---------------------------------------------------------------------------
 
@@ -539,7 +604,12 @@ You analyze Software-Defined Radio (SDR) side-channel RF emissions captured from
 
 Your objective is to provide a rigorous, highly technical forensic assessment grounded in ISO/IEC 7816-3 protocols, analog RF side-channel physics, PCI PTS v6.0 Module 1, and PCI DSS v4.0 Requirement 9.9.
 
-Provide thorough, technically descriptive explanations of the root cause, coupling mechanisms, and hardware attack surface. Do not artificially abbreviate your technical reasoning. Avoid generic conversational greetings or conversational filler.
+Provide thorough, technically descriptive explanations of the root cause, coupling mechanisms, and hardware attack surface. Keep string values formatted on a single continuous line without unescaped literal newlines.
+
+CRITICAL OUTPUT CONSTRAINTS:
+- Output MUST be valid, raw RFC 8259 JSON starting with '{' and ending with '}'.
+- Do NOT wrap output in markdown code blocks (NO \`\`\` or \`\`\`json fences).
+- Do NOT include any introductory or conversational text.
 
 Respond ONLY with valid JSON matching this exact schema:
 {
@@ -558,12 +628,7 @@ Respond ONLY with valid JSON matching this exact schema:
   "forensic_analysis": "Comprehensive technical breakdown of the physical side-channel emission. Explain how the observed spectral spread, harmonic surge, and signal persistence map to the hardware exploit, whether capacitive contact sniffing, rogue wireless offloading, or Faraday attenuation.",
   "pci_compliance_impact": "Direct analysis of non-compliance under PCI PTS v6.0 (Section B1/B2) and PCI DSS v4.0 (Req 9.9 tamper detection obligations).",
   "rationale": "Concise executive forensic summary combining the physical observation with the primary threat conclusion."
-}
-  CRITICAL OUTPUT CONSTRAINT:
-- Output MUST be valid, raw RFC 8259 JSON starting with '{' and ending with '}'.
-- Do NOT wrap output in markdown code blocks (NO \`\`\` or \`\`\`json fences).
-- Do NOT include any introductory or concluding text.
-- Do NOT use raw unescaped newlines inside JSON string values.`;
+}`;
 
   const userContext = `HARDWARE TELEMETRY EVENT CONTEXT:
 - Terminal Identifier: ${metrics.deviceId}
@@ -582,7 +647,7 @@ Respond ONLY with valid JSON matching this exact schema:
 - Heuristic Pre-Classifier: ${metrics.likelyType}`;
 
   const targetUrl =
-    process.env.AGENT_ENDPOINT_URL || "https://api.linode.com/v4/ai/inference";
+    process.env.AGENT_ENDPOINT_URL || "[https://api.linode.com/v4/ai/inference](https://api.linode.com/v4/ai/inference)";
   const apiKey = process.env.AGENT_API_KEY || process.env.AKAMAI_AI_TOKEN || "";
   const modelId = process.env.AGENT_MODEL || "meta/llama-3-8b-instruct";
 
@@ -607,22 +672,20 @@ Respond ONLY with valid JSON matching this exact schema:
 
     if (res.ok) {
       const data = await res.json();
-      let rawText: string = data.choices?.[0]?.message?.content ?? data.response;
-      rawText = rawText.trim();
-      if (rawText.startsWith("```")) {
-        rawText = rawText.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-      }
-      const parsed = JSON.parse(rawText) as AgentVerdict;
+      const rawText: string = data.choices?.[0]?.message?.content ?? data.response;
+      const parsed = safeParseAgentResponse(rawText);
 
-      return {
-        ...parsed,
-        confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0.95,
-        rationale:
-          parsed.rationale ||
-          (Array.isArray(parsed.threat_diagnosis)
-            ? parsed.threat_diagnosis.join(". ")
-            : "Deterministic RF anomaly confirmed by physical bounds."),
-      };
+      if (parsed) {
+        return {
+          ...parsed,
+          confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0.95,
+          rationale:
+            parsed.rationale ||
+            (Array.isArray(parsed.threat_diagnosis)
+              ? parsed.threat_diagnosis.join(". ")
+              : "Deterministic RF anomaly confirmed by physical bounds."),
+        };
+      }
     }
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Unknown error";
@@ -736,83 +799,63 @@ Bun.serve<WSData>({
       return new Response("WebSocket Upgrade Failed (/egress)", { status: 400 });
     }
 
-    // Bridge standard HTTP requests into Next.js App Router
+    // Bridge HTTP requests into Next.js using Node.js IncomingMessage & ServerResponse
     return new Promise<Response>(async (resolve) => {
+      const socket = new Socket();
+      const nodeReq = new IncomingMessage(socket);
+      nodeReq.url = url.pathname + url.search;
+      nodeReq.method = req.method;
+
+      req.headers.forEach((val, key) => {
+        nodeReq.headers[key.toLowerCase()] = val;
+      });
+
+      const bodyBuffer = req.body ? Buffer.from(await req.arrayBuffer()) : null;
+      if (bodyBuffer) {
+        nodeReq.push(bodyBuffer);
+      }
+      nodeReq.push(null);
+
+      const nodeRes = new ServerResponse(nodeReq);
       const chunks: Buffer[] = [];
-      let statusCode = 200;
-      let statusText = "OK";
-      const headers = new Headers();
 
-      const nodeReq = Object.assign(
-        Readable.from(req.body ? Buffer.from(await req.arrayBuffer()) : []),
-        {
-          url: url.pathname + url.search,
-          method: req.method,
-          headers: Object.fromEntries(req.headers.entries()),
-          rawHeaders: Array.from(req.headers.entries()).flat(),
-          socket: { encrypted: url.protocol === "https:" },
+      nodeRes.write = function (chunk: any) {
+        if (chunk) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
         }
-      );
+        return true;
+      };
 
-      const nodeRes = Object.assign(
-        new Writable({
-          write(chunk, _encoding, callback) {
-            chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-            callback();
-          },
-          final(callback) {
-            const body = Buffer.concat(chunks);
-            resolve(new Response(body, { status: statusCode, statusText, headers }));
-            callback();
-          },
-        }),
-        {
-          statusCode: 200,
-          statusMessage: "OK",
-          headersSent: false,
-          setHeader(name: string, value: string | string[]) {
-            if (Array.isArray(value)) {
-              headers.delete(name);
-              value.forEach((v) => headers.append(name, v));
-            } else {
-              headers.set(name, value);
-            }
-          },
-          getHeader(name: string) {
-            return headers.get(name);
-          },
-          hasHeader(name: string) {
-            return headers.has(name);
-          },
-          removeHeader(name: string) {
-            headers.delete(name);
-          },
-          writeHead(code: number, messageOrHeaders?: any, maybeHeaders?: any) {
-            statusCode = code;
-            if (typeof messageOrHeaders === "string") {
-              statusText = messageOrHeaders;
-            }
-            const h =
-              typeof messageOrHeaders === "object" ? messageOrHeaders : maybeHeaders;
-            if (h) {
-              for (const [k, v] of Object.entries(h)) {
-                this.setHeader(k, v as any);
-              }
-            }
-            return this;
-          },
-          end(chunk?: any) {
-            if (chunk) {
-              chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-            }
-            const body = Buffer.concat(chunks);
-            resolve(new Response(body, { status: statusCode, statusText, headers }));
-          },
+      nodeRes.end = function (chunk: any) {
+        if (chunk) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
         }
-      );
+
+        const resBody = Buffer.concat(chunks);
+        const headers = new Headers();
+        const rawHeaders = nodeRes.getHeaders();
+
+        for (const [key, val] of Object.entries(rawHeaders)) {
+          if (val === undefined || val === null) continue;
+          if (Array.isArray(val)) {
+            val.forEach((v) => headers.append(key, String(v)));
+          } else {
+            headers.set(key, String(val));
+          }
+        }
+
+        resolve(
+          new Response(resBody, {
+            status: nodeRes.statusCode || 200,
+            statusText: nodeRes.statusMessage || "OK",
+            headers,
+          })
+        );
+        return nodeRes;
+      };
 
       try {
-        await handle(nodeReq as any, nodeRes as any);
+        await handle(nodeReq, nodeRes);
       } catch (err: unknown) {
         console.error("[Next.js Render Error]:", err);
         resolve(new Response("Internal Server Error", { status: 500 }));
@@ -977,6 +1020,6 @@ Bun.serve<WSData>({
   },
 });
 
-console.log(`> Bun runtime active on http://localhost:${PORT}`);
-console.log(`> Telemetry Ingest: ws://localhost:${PORT}/ingest`);
-console.log(`> Dashboard Egress: ws://localhost:${PORT}/egress`);
+console.log(`> Bun runtime active on [http://0.0.0.0](http://0.0.0.0):${PORT}`);
+console.log(`> Telemetry Ingest: ws://0.0.0.0:${PORT}/ingest`);
+console.log(`> Dashboard Egress: ws://0.0.0.0:${PORT}/egress`);

@@ -25,7 +25,7 @@ import websockets
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
-CLOUD_URL = "ws://172.20.10.4:8000"
+CLOUD_URL = "ws://173.255.199.123:3001/ingest"
 DEVICE_ID = "pos_terminal_01"
 
 # Target Frequency Range: 47.2 MHz to 49.2 MHz (2.0 MHz span)
@@ -89,7 +89,7 @@ def capture_spectrum_snapshot(sdr, start_freq=START_FREQ_HZ, stop_freq=STOP_FREQ
 
     # 7. Map to formatted JSON dictionary
     spectrum_map = {
-        f"{f:.2f}M": round(float(db), 2)
+        f"{f:.3f}M": round(float(db), 2)
         for f, db in zip(sampled_freqs, sampled_dbfs)
     }
 
@@ -119,7 +119,7 @@ async def stream_to_cloud():
                     spectrum_map = capture_spectrum_snapshot(sdr, num_bins=200)
 
                     payload = {
-                        "device_id": DEVICE_ID,
+                        "deviceId": DEVICE_ID,
                         "timestamp": round(time.time(), 2),
                         "spectrum": spectrum_map
                     }

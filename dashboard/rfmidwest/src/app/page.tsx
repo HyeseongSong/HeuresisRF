@@ -200,8 +200,11 @@ export default function Home() {
                   dot={false}
                 />
               </AreaChart>
-              {/* Incident List Container */}
-              <div className="max-w-4xl mx-auto space-y-4">
+            </ResponsiveContainer>
+          )}
+        </div>
+        {/* Incident List Container */}
+              <div className="w-full px-6 mx-auto space-y-4">
                 {incidents.length === 0 ? (
                   <div className="text-center py-16 bg-slate-900/40 rounded-xl border border-slate-900">
                     <p className="text-slate-400 text-sm">No incidents recorded yet.</p>
@@ -269,9 +272,6 @@ export default function Home() {
                   ))
                 )}
               </div>
-            </ResponsiveContainer>
-          )}
-        </div>
       </main>
     </div>
   );

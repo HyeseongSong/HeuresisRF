@@ -11,7 +11,7 @@ import {
   Tooltip,
   ReferenceLine,
 } from 'recharts';
-import { useSharedWebSocket, WebSocketMessage } from '@/hooks/webSocketConnection';
+import { useSharedWebSocket, IncidentAlertPayload, WebSocketMessage } from '@/hooks/webSocketConnection';
 
 interface SpectrumPoint {
   mhz: number;
@@ -23,6 +23,7 @@ export default function Home() {
   const [spectrumData, setSpectrumData] = useState<SpectrumPoint[]>([]);
   const [peakRssi, setPeakRssi] = useState<number | null>(null);
   const [activeDeviceId, setActiveDeviceId] = useState<string>('pos_terminal_01');
+  const [incidents, setIncidents] = useState<IncidentAlertPayload[]>([]);
 
   const { isConnected, lastMessage } = useSharedWebSocket();
 
@@ -58,8 +59,29 @@ export default function Home() {
           setSpectrumData(parsed);
         }
       }
+    } else if (payload.event === 'INCIDENT_ALERT') {
+      setIncidents((prevIncidents) => {
+        // Optional: Prevent duplicate entries if the socket resends the same ID
+        const exists = prevIncidents.some((inc) => inc.incidentId === payload.incidentId);
+        if (exists) return prevIncidents;
+
+        return [payload, ...prevIncidents];
+      });
     }
   }, [lastMessage]);
+
+  const getRiskBadgeColor = (risk: string) => {
+    switch (risk?.toUpperCase()) {
+      case 'CRITICAL':
+        return 'bg-red-500/10 text-red-400 border-red-500/20';
+      case 'HIGH':
+        return 'bg-orange-500/10 text-orange-400 border-orange-500/20';
+      case 'MEDIUM':
+        return 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20';
+      default:
+        return 'bg-blue-500/10 text-blue-400 border-blue-500/20';
+    }
+  };
 
   // Compute peak frequency bin dynamically
   const peakPoint = useMemo(() => {
@@ -178,10 +200,78 @@ export default function Home() {
                   dot={false}
                 />
               </AreaChart>
+              {/* Incident List Container */}
+              <div className="max-w-4xl mx-auto space-y-4">
+                {incidents.length === 0 ? (
+                  <div className="text-center py-16 bg-slate-900/40 rounded-xl border border-slate-900">
+                    <p className="text-slate-400 text-sm">No incidents recorded yet.</p>
+                    <p className="text-slate-600 text-xs mt-1">Listening for incoming INCIDENT_ALERT payloads...</p>
+                  </div>
+                ) : (
+                  incidents.map((incident) => (
+                    <div
+                      key={incident.incidentId}
+                      className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-lg transition-all hover:border-slate-700"
+                    >
+                      {/* Card Header */}
+                      <div className="flex items-center justify-between mb-4">
+                        <div className="flex items-center space-x-3">
+                          <span className="text-sm font-bold text-red-400 uppercase tracking-wide">
+                            Incident #{incident.incidentId}
+                          </span>
+                          <span className="text-xs text-slate-400">
+                            Device: <strong className="text-slate-200">{incident.deviceId}</strong>
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs font-bold px-2.5 py-0.5 rounded-full border ${getRiskBadgeColor(incident.verdict.risk_level)}`}>
+                            {incident.verdict.risk_level}
+                          </span>
+                          <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-red-500/20 text-red-300 border border-red-500/30">
+                            {incident.status}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Threat Details */}
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-slate-950/50 p-4 rounded-lg border border-slate-800/60 mb-4">
+                        <div>
+                          <p className="text-xs text-slate-400">Threat Type</p>
+                          <p className="text-sm font-semibold text-slate-200">{incident.verdict.threat_type}</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-slate-400">Compromised Vector</p>
+                          <p className="text-xs font-mono text-amber-400 mt-0.5">{incident.verdict.compromised_vector}</p>
+                        </div>
+                      </div>
+
+                      {/* Justification */}
+                      <p className="text-xs text-slate-300 mb-4 leading-relaxed">
+                        {incident.verdict.risk_justification}
+                      </p>
+
+                      {/* Action Banner */}
+                      <div className="bg-red-950/20 border border-red-500/20 p-3 rounded-lg flex items-center justify-between text-xs">
+                        <div>
+                          <span className="text-red-400 font-bold uppercase tracking-wider">Containment Action: </span>
+                          <span className="text-slate-200 font-mono ml-1">{incident.verdict.pci_containment_action}</span>
+                        </div>
+                        <span className="bg-red-600 text-white font-bold px-3 py-1 rounded shadow">
+                          {incident.verdict.action}
+                        </span>
+                      </div>
+
+                      {/* Timestamp Footer */}
+                      <div className="mt-4 pt-3 border-t border-slate-800/80 flex justify-end text-xs text-slate-500">
+                        {new Date(incident.timestamp * 1000).toLocaleString()}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
             </ResponsiveContainer>
           )}
         </div>
-
       </main>
     </div>
   );

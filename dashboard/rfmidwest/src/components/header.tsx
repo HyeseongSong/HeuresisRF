@@ -10,33 +10,47 @@ import {
   Wifi, 
   WifiOff, 
   RotateCcw,
-  Sparkles
+  Sparkles,
+  Satellite
 } from 'lucide-react';
-import { useSharedWebSocket, TelemetryPayload } from '@/hooks/webSocketConnection';
+import { 
+  useSharedWebSocket,
+  WebSocketMessage 
+} from '@/hooks/webSocketConnection';
 
-export type TamperState = 'SECURE' | 'BREACH_UPPER' | 'BREACH_LOWER';
+// export type TamperState = 'SECURE' | 'BREACH_UPPER' | 'BREACH_LOWER';
 
 interface HeaderProps {
-  status?: TamperState;
-  deviceId?: string;
-  isWsConnected?: boolean;
-  currentRssi?: number | null;
-  pMax?: number;
-  pMin?: number;
-  isAiAnalyzing?: boolean;
+  // status?: TamperState;
+  // deviceId?: string;
+  // isWsConnected?: boolean;
+  // currentRssi?: number | null;
+  // pMax?: number;
+  // pMin?: number;
+  // isAiAnalyzing?: boolean;
   onResetAlarm?: () => void;
 }
 
+let secure = true; 
+let isAiAnalyzing = false;
+let formattedTimestamp = 'AWAITING';
+let statusConfig = {
+    title: 'SYSTEM SECURE // EM RUNTIME BOUNDS OK',
+    subtitle: 'Active SDR Physical Layer Monitoring',
+    bgColor: 'bg-emerald-950/60 border-emerald-500/70 text-emerald-200',
+    pulseColor: 'bg-emerald-400',
+    icon: <ShieldCheck className="w-5 h-5 text-emerald-400" />,
+  };
+
 export default function Header({
-  status = 'SECURE',
-  deviceId = 'pos_terminal_01',
-  currentRssi = -58.4,
-  pMax = -55.0,
-  pMin = -85.0,
-  isAiAnalyzing = false,
+  // status = 'SECURE',
+  // deviceId = 'pos_terminal_01',
+  // currentRssi = -58.4,
+  // pMax = -55.0,
+  // pMin = -85.0,
+  // isAiAnalyzing = false,
   onResetAlarm,
 }: HeaderProps) {
-  const isAlarm = status !== 'SECURE';
 
   // Prevent SSR evaluation crashes by verifying client mounting
   const [isMounted, setIsMounted] = useState(false);
@@ -46,52 +60,62 @@ export default function Header({
 
   const { isConnected, lastMessage } = useSharedWebSocket();
 
-  const telemetry = lastMessage as TelemetryPayload | null;
-
+  const payload = lastMessage as WebSocketMessage | null;
 
   // Safely fallback to prop default before initial WS frame arrives or during SSR
-  const activeDeviceId = (isMounted && telemetry?.device_id) ? telemetry.device_id : deviceId;
+  const activeDeviceId = (isMounted && payload?.deviceId) ? payload.deviceId : "Waiting";
 
-  const formattedTimestamp = isMounted && telemetry?.timestamp 
-    ? new Date(telemetry.timestamp * 1000).toLocaleTimeString('en-US', {
-        hour12: false,
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-      })
-    : 'AWAITING...';
+  switch (payload?.event) {
+    case "TELEMETRY_POINT":
+      formattedTimestamp = isMounted && payload.timestamp 
+        ? new Date(payload.timestamp * 1000).toLocaleTimeString('en-US', {
+            hour12: false,
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          })
+        : 'AWAITING...';
+      break;
+    case "HEURISTIC_ALERT_TRIGGERED":
+      secure = false;
+      isAiAnalyzing = true;
+      statusConfig = {
+        title: payload.heuristic.likelyType,
+        subtitle: "Potential Incident Detected",
+        bgColor: 'bg-amber-950/80 border-amber-500 text-amber-200',
+        pulseColor: 'bg-amber-500',
+        icon: <ShieldAlert className="w-5 h-5 text-amber-400 animate-bounce" />,
+      };
+      break;
+    case "INCIDENT_ALERT":
+      secure = false;
+      isAiAnalyzing = false;
+      statusConfig = {
+        title: payload.status,
+        subtitle: "Threat Detected",
+        bgColor: 'bg-amber-950/80 border-amber-500 text-amber-200',
+        pulseColor: 'bg-amber-500',
+        icon: <ShieldAlert className="w-5 h-5 text-amber-400 animate-bounce" />,
+      };
+      break;
+    case "INGEST_STATUS_CHANGE":
+      if (payload.status == "ONLINE") {
+        setIsMounted(true);
+      } else {
+        setIsMounted(false);
+      }
+      break;
+    case "STATUS_RECOVERED":
+    default:
+      statusConfig = {
+        title: 'SYSTEM SECURE // EM RUNTIME BOUNDS OK',
+        subtitle: 'Active SDR Physical Layer Monitoring',
+        bgColor: 'bg-emerald-950/60 border-emerald-500/70 text-emerald-200',
+        pulseColor: 'bg-emerald-400',
+        icon: <ShieldCheck className="w-5 h-5 text-emerald-400" />,
+      };
+  }
 
-  const getStatusBadge = () => {
-    switch (status) {
-      case 'BREACH_UPPER':
-        return {
-          title: 'TAMPER ALARM // ROGUE SHIMMER DETECTED',
-          subtitle: `RF Spike Exceeded Pmax (${pMax} dBm)`,
-          bgColor: 'bg-rose-950/80 border-rose-500 text-rose-200',
-          pulseColor: 'bg-rose-500',
-          icon: <ShieldAlert className="w-5 h-5 text-rose-400 animate-bounce" />,
-        };
-      case 'BREACH_LOWER':
-        return {
-          title: 'TAMPER ALARM // SHIELDING / CUT ANTENNA',
-          subtitle: `Signal Dropped Below Pmin (${pMin} dBm)`,
-          bgColor: 'bg-amber-950/80 border-amber-500 text-amber-200',
-          pulseColor: 'bg-amber-500',
-          icon: <ShieldAlert className="w-5 h-5 text-amber-400 animate-bounce" />,
-        };
-      case 'SECURE':
-      default:
-        return {
-          title: 'SYSTEM SECURE // EM RUNTIME BOUNDS OK',
-          subtitle: 'Active SDR Physical Layer Monitoring',
-          bgColor: 'bg-emerald-950/60 border-emerald-500/70 text-emerald-200',
-          pulseColor: 'bg-emerald-400',
-          icon: <ShieldCheck className="w-5 h-5 text-emerald-400" />,
-        };
-    }
-  };
-
-  const statusConfig = getStatusBadge();
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-zinc-800 bg-zinc-950/90 backdrop-blur-md px-4 py-3 sm:px-6 transition-colors duration-300">
@@ -100,7 +124,7 @@ export default function Header({
         {/* Brand & Terminal Target */}
         <div className="flex items-center gap-3">
           <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-zinc-900 border border-zinc-700/80 shadow-inner">
-            <Radio className={`w-5 h-5 ${isAlarm ? 'text-rose-400 animate-pulse' : 'text-cyan-400'}`} />
+            <Radio className={`w-5 h-5 ${!secure ? 'text-rose-400 animate-pulse' : 'text-cyan-400'}`} />
           </div>
           <div>
             <div className="flex items-center gap-2">
@@ -140,7 +164,7 @@ export default function Header({
           </div>
 
           {/* Reset / Silence Button */}
-          {isAlarm && onResetAlarm && (
+          {!secure && onResetAlarm && (
             <button
               onClick={onResetAlarm}
               className="ml-2 flex items-center gap-1.5 px-2.5 py-1 text-xs font-mono font-medium rounded-md bg-zinc-900/90 text-zinc-200 border border-zinc-700 hover:bg-zinc-800 hover:text-white transition-all shadow"

@@ -3,9 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "bun run --watch server.ts",
+    "dev": "bun run --watch src/server.ts",
     "build": "next build",
-    "start": "NODE_ENV=production bun run server.ts",
+    "start": "NODE_ENV=production bun run src/server.ts",
     "lint": "biome check",
     "format": "biome format --write"
   },

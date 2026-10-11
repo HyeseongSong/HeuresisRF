@@ -7,7 +7,7 @@ import { ReactNode } from "react";
 
 export function Providers({ children }: { children: ReactNode }) {
   return (
-    <WebSocketProvider url="ws://173.255.199.123:3001/egress">
+    <WebSocketProvider url="ws://127.0.0.1:3001/egress">
       <Header />
       {children}
     </WebSocketProvider>

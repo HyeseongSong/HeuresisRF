@@ -92,7 +92,7 @@ class CircularSignalBuffer {
   private head = 0;
   private count = 0;
 
-  constructor(private readonly capacity: number = 120) {
+  constructor(private readonly capacity: number = 180) {
     this.buffer = new Array(capacity);
   }
 
@@ -140,14 +140,22 @@ export class POSSignalTracker {
   private recoveryTimestamps = new Map<string, number>();
   private breachCandidates = new Map<string, BreachCandidate>();
   private lastActivityTimestamps = new Map<string, number>();
+  
+  // Track rolling baseline per device during secure operation
+  private deviceBaselines = new Map<string, number>();
+  private readonly DEFAULT_BASELINE_RSSI = -62.0;
 
-  private readonly WINDOW_SECONDS = 3.0;
-  private readonly MIN_SAMPLES = 4;
+  private readonly WINDOW_SECONDS = 5.0; // Keep enough history to capture the transition
+  private readonly MIN_SAMPLES = 6;
   private readonly P_MAX = -38.0;
   private readonly P_MIN = -82.0;
   private readonly RECOVERY_REQUIRED_SEC = 2.0;
   private readonly UPPER_BREACH_THRESHOLD = 3;
-  private readonly LOWER_BREACH_THRESHOLD = 12;
+  
+  // Shielding requires sustained confirmation to prevent immediate false alarms
+  private readonly LOWER_BREACH_THRESHOLD = 18;
+  private readonly MIN_LOWER_BREACH_DURATION_SEC = 2.0;
+
   private readonly CANDIDATE_EXPIRY_SEC = 10.0;
   private readonly DEVICE_INACTIVITY_TTL_SEC = 3600.0;
   private readonly MAX_TRACKED_DEVICES = 1000;
@@ -162,6 +170,7 @@ export class POSSignalTracker {
         this.recoveryTimestamps.delete(id);
         this.breachCandidates.delete(id);
         this.lastActivityTimestamps.delete(id);
+        this.deviceBaselines.delete(id);
       }
     }
   }
@@ -202,7 +211,7 @@ export class POSSignalTracker {
 
     let ring = this.buffers.get(deviceId);
     if (!ring) {
-      ring = new CircularSignalBuffer(120);
+      ring = new CircularSignalBuffer(180);
       this.buffers.set(deviceId, ring);
     }
     ring.push({ t: timestamp, rssi });
@@ -221,6 +230,16 @@ export class POSSignalTracker {
 
     const currentState = this.terminalStates.get(deviceId) ?? "SECURE";
 
+    // Track baseline while the terminal is in healthy operating bounds
+    if (currentState === "SECURE" && !isBreached) {
+      const prevBaseline = this.deviceBaselines.get(deviceId) ?? rssi;
+      // Exponential moving average: 95% history, 5% current sample
+      this.deviceBaselines.set(
+        deviceId,
+        Number((prevBaseline * 0.95 + currentMeanRssi * 0.05).toFixed(2))
+      );
+    }
+
     if (currentState === "COMPROMISED") {
       if (!isBreached) {
         const firstSafeTime = this.recoveryTimestamps.get(deviceId) ?? timestamp;
@@ -230,7 +249,7 @@ export class POSSignalTracker {
           this.terminalStates.set(deviceId, "SECURE");
           this.recoveryTimestamps.delete(deviceId);
           this.breachCandidates.delete(deviceId);
-          return { kind: "RECOVERED", deviceId: deviceId, recoveryTimestamp: timestamp };
+          return { kind: "RECOVERED", deviceId, recoveryTimestamp: timestamp };
         }
       } else {
         this.recoveryTimestamps.delete(deviceId);
@@ -271,9 +290,15 @@ export class POSSignalTracker {
     candidate.lastUpdatedTimestamp = timestamp;
     candidate.peakBins.push(spectral.peakBinIndex);
 
+    // Enforce both minimum frames AND minimum sustained time for lower breaches
     const reqFrames =
       breachType === "LOWER" ? this.LOWER_BREACH_THRESHOLD : this.UPPER_BREACH_THRESHOLD;
     if (candidate.count < reqFrames) return null;
+
+    const durationUnderBreach = timestamp - candidate.firstBreachTimestamp;
+    if (breachType === "LOWER" && durationUnderBreach < this.MIN_LOWER_BREACH_DURATION_SEC) {
+      return null;
+    }
 
     if (breachType === "UPPER" && spectral.peakBinPower > this.P_MAX && spectral.isNarrowbandSpike) {
       const recent = candidate.peakBins.slice(-this.UPPER_BREACH_THRESHOLD);
@@ -326,13 +351,25 @@ export class POSSignalTracker {
     }
     const intervalStdDev = numIntervals > 0 ? Math.sqrt(intervalVarSum / numIntervals) : 0;
 
+    // Calculate baseline and drop metrics
+    const baselineRssi = this.deviceBaselines.get(deviceId) ?? this.DEFAULT_BASELINE_RSSI;
+    const attenuationDropDb = Number(Math.max(0, baselineRssi - activeMeanRssi).toFixed(2));
+
     const effectivePowerDbm = Math.max(activeMeanRssi, spectral.peakBinPower);
-    const deltaDb = Number((effectivePowerDbm - this.P_MAX).toFixed(2));
-    const powerSurgeRatio = deltaDb > 0 ? Number(Math.pow(10, deltaDb / 10).toFixed(1)) : 1.0;
+    
+    // For lower breaches: deltaDb measures drop below baseline; powerSurgeRatio measures collapse factor
+    const deltaDb = isLowerBreach
+      ? Number((-attenuationDropDb).toFixed(2))
+      : Number((effectivePowerDbm - this.P_MAX).toFixed(2));
+
+    const powerSurgeRatio = isLowerBreach
+      ? Number(Math.pow(10, attenuationDropDb / 10).toFixed(1))
+      : (deltaDb > 0 ? Number(Math.pow(10, deltaDb / 10).toFixed(1)) : 1.0);
 
     let likelyType: ThreatType = "FALSE_POSITIVE";
     if (isLowerBreach && !isUpperBreach) {
-      likelyType = "COMMUNICATION_JAMMING";
+      // Require genuine attenuation drop below established baseline
+      likelyType = attenuationDropDb >= 12.0 ? "COMMUNICATION_JAMMING" : "FALSE_POSITIVE";
     } else if (activeVariance > 14.0 && !spectral.isNarrowbandSpike) {
       likelyType = "FALSE_POSITIVE";
     } else if (spectral.isNarrowbandSpike && effectivePowerDbm >= this.P_MAX) {
@@ -355,9 +392,9 @@ export class POSSignalTracker {
 
     return {
       kind: "ALERT",
-      deviceId: deviceId,
+      deviceId,
       metrics: {
-        deviceId: deviceId,
+        deviceId,
         sampleCount: series.length,
         meanRssi: Number(activeMeanRssi.toFixed(2)),
         variance: Number(activeVariance.toFixed(2)),
@@ -382,5 +419,6 @@ export class POSSignalTracker {
     this.breachCandidates.delete(deviceId);
     this.buffers.delete(deviceId);
     this.lastActivityTimestamps.delete(deviceId);
+    this.deviceBaselines.delete(deviceId);
   }
 }

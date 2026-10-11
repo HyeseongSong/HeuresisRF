@@ -1,5 +1,6 @@
 // server.ts
 import type { ServerWebSocket } from "bun";
+import { sql } from "drizzle-orm";
 import { db } from "./lib/db";
 import { incidentVerdicts } from "./lib/schema";
 import { POSSignalTracker, parseHardwarePayload } from "./tracker";
@@ -13,6 +14,29 @@ let activeIngestConnections = 0;
 const connectedIngestDevices = new Map<string, number>();
 const activeEvaluations = new Set<string>();
 
+// Track live physical security state per device in memory
+const deviceSecurityState = new Map<string, "SECURE" | "COMPROMISED">();
+
+let incidentSeq = 0;
+
+try {
+  const existing = await db.select().from(incidentVerdicts);
+  if (existing.length > 0) {
+    incidentSeq = Math.max(0, ...existing.map((r) => Number(r.id) || 0));
+    await db.execute(
+      sql`SELECT setval(pg_get_serial_sequence('incident_verdicts', 'id'), ${incidentSeq}, true)`
+    );
+  } else {
+    incidentSeq = 0;
+    await db.execute(
+      sql`SELECT setval(pg_get_serial_sequence('incident_verdicts', 'id'), 1, false)`
+    );
+  }
+  console.log(`[WS BACKEND] Seeded incident ID sequence at: ${incidentSeq}`);
+} catch (e) {
+  console.warn("[WS BACKEND] Could not sync initial incident sequence with DB:", e);
+}
+
 let server = Bun.serve<WSData>({
   port: WS_PORT,
   hostname: "0.0.0.0",
@@ -21,10 +45,8 @@ let server = Bun.serve<WSData>({
     const url = new URL(req.url);
 
     if (url.pathname === "/ingest" || url.pathname === "/egress") {
-      console.log(`[WS BACKEND] Upgrade request received for: ${url.pathname}`);
       const type = url.pathname === "/ingest" ? "INGEST" : "EGRESS";
       const upgraded = server.upgrade(req, { data: { type, connectedAt: Date.now() } });
-      console.log(`[WS BACKEND] Upgrade result: ${upgraded}`);
       if (upgraded) return undefined;
       return new Response(`WebSocket Upgrade Failed (${url.pathname})`, { status: 400 });
     }
@@ -33,22 +55,76 @@ let server = Bun.serve<WSData>({
   },
 
   websocket: {
-    open(ws: ServerWebSocket<WSData>) {
+    async open(ws: ServerWebSocket<WSData>) {
       if (ws.data.type === "EGRESS") {
         ws.subscribe("dashboard-feed");
+
+        const activeList = Array.from(connectedIngestDevices.keys());
+        const primaryDevice = activeList[0] ?? "pos_terminal_01";
+
+        // 1. Send live ingestion status
         if (activeIngestConnections > 0) {
-          const activeList = Array.from(connectedIngestDevices.keys());
           ws.send(
             JSON.stringify({
               event: "INGEST_STATUS_CHANGE",
               status: "ONLINE",
-              deviceId: activeList[0] ?? null,
+              deviceId: primaryDevice,
               activeDevices: activeList,
               activeIngestCount: activeIngestConnections,
               timestamp: Number((Date.now() / 1000).toFixed(2)),
             })
           );
         }
+
+        // 2. Fetch all historical incident alerts and replay chronologically
+        try {
+          const records = await db.select().from(incidentVerdicts);
+          records.sort((a, b) => Number(a.id) - Number(b.id));
+
+          ws.cork(() => {
+            for (const record of records) {
+              if (record.classification === "SECURE_RECOVERED") continue;
+
+              const recordTimestamp = (record as any).createdAt
+                ? Number((new Date((record as any).createdAt).getTime() / 1000).toFixed(2))
+                : Number((Date.now() / 1000).toFixed(2));
+
+              ws.send(
+                JSON.stringify({
+                  event: "INCIDENT_ALERT",
+                  incidentId: Number(record.id),
+                  deviceId: record.deviceId,
+                  timestamp: recordTimestamp,
+                  status: "COMPROMISED",
+                  isReplay: true, // Tag as historical record
+                  verdict: {
+                    threat_type: record.classification,
+                    confidence: record.confidence != null ? Number(record.confidence) : undefined,
+                    rationale: record.rationale,
+                    action: record.actionTaken,
+                  },
+                })
+              );
+            }
+
+            // 3. Sync client with the CURRENT in-memory state of the terminal
+            const currentState = deviceSecurityState.get(primaryDevice) ?? "SECURE";
+            if (currentState === "SECURE") {
+              ws.send(
+                JSON.stringify({
+                  event: "STATUS_RECOVERED",
+                  deviceId: primaryDevice,
+                  status: "SECURE",
+                  reason: "SUSTAINED_BASELINE",
+                  timestamp: Number((Date.now() / 1000).toFixed(2)),
+                })
+              );
+            }
+          });
+        } catch (dbErr) {
+          console.error("[Postgres Egress History Read Error]:", dbErr);
+        }
+
         return;
       }
 
@@ -107,37 +183,15 @@ let server = Bun.serve<WSData>({
         const result = tracker.processReading(payload);
         if (!result) return;
 
+        // Transition: Terminal baseline recovered
         if (result.kind === "RECOVERED") {
           activeEvaluations.delete(result.deviceId);
-          let recoveryId = Date.now();
-
-          try {
-            const [recoveryRecord] = await db
-              .insert(incidentVerdicts)
-              .values({
-                deviceId: result.deviceId,
-                classification: "SECURE_RECOVERED",
-                confidence: 1.0,
-                meanRssi: payload.rssi,
-                variance: 0.0,
-                sampleCount: 0,
-                rationale:
-                  "RF physical emissions stabilized within safe baseline bounds for > 2.0s. Terminal unlocked.",
-                actionTaken: "RESTORE_NORMAL",
-                rawSeries: JSON.stringify([]),
-              })
-              .returning();
-
-            if (recoveryRecord?.id) recoveryId = recoveryRecord.id;
-          } catch (dbErr) {
-            console.error("[Postgres Recovery Write Error]:", dbErr);
-          }
+          deviceSecurityState.set(result.deviceId, "SECURE");
 
           server.publish(
             "dashboard-feed",
             JSON.stringify({
               event: "STATUS_RECOVERED",
-              incidentId: recoveryId,
               deviceId: result.deviceId,
               status: "SECURE",
               reason: "SUSTAINED_BASELINE",
@@ -149,6 +203,8 @@ let server = Bun.serve<WSData>({
         }
 
         const { metrics } = result;
+        deviceSecurityState.set(metrics.deviceId, "COMPROMISED");
+
         server.publish(
           "dashboard-feed",
           JSON.stringify({
@@ -176,15 +232,17 @@ let server = Bun.serve<WSData>({
           })
         );
 
-        if (activeEvaluations.has(metrics.deviceId)) {
-          return;
-        }
-
+        if (activeEvaluations.has(metrics.deviceId)) return;
         activeEvaluations.add(metrics.deviceId);
 
         try {
           const verdict = await evaluateWithAgent(metrics);
-          let incidentId = Date.now();
+          if (verdict.threat_type === "FALSE_POSITIVE") {
+            deviceSecurityState.set(metrics.deviceId, "SECURE");
+          } else {
+            deviceSecurityState.set(metrics.deviceId, "COMPROMISED");
+          }
+          let incidentId = ++incidentSeq;
 
           try {
             const [record] = await db
@@ -202,7 +260,10 @@ let server = Bun.serve<WSData>({
               })
               .returning();
 
-            if (record?.id) incidentId = record.id;
+            if (record?.id != null) {
+              incidentId = Number(record.id);
+              incidentSeq = Math.max(incidentSeq, incidentId);
+            }
           } catch (dbErr) {
             console.error("[Postgres Incident Write Error]:", dbErr);
           }

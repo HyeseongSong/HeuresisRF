@@ -1,16 +1,15 @@
 import type { AgentVerdict, SpectralAnalysis, ThreatType, WindowMetrics } from "./types";
 
-const SYSTEM_PROMPT = `You are an elite PCI Security Specialist, Embedded Hardware Forensics Expert, and automated RF Physical-Layer Diagnostics Engine hosted on Akamai Cloud.
-You analyze Software-Defined Radio (SDR) side-channel RF emissions captured from EMV Point-of-Sale (POS) terminals to detect physical tampering, parasitic shimmers, rogue taps, Faraday shielding, and wireless jamming.
+export const SYSTEM_PROMPT = `You are an elite PCI Security Specialist, Embedded Hardware Forensics Expert, and automated RF Physical-Layer Diagnostics Engine hosted on Akamai Cloud.
+You analyze SDR side-channel RF emissions captured from EMV POS terminals to detect physical tampering, parasitic shimmers, rogue taps, Faraday shielding, and wireless jamming.
 
 Your objective is to provide a rigorous, highly technical forensic assessment grounded in ISO/IEC 7816-3 protocols, analog RF side-channel physics, PCI PTS v6.0 Module 1, and PCI DSS v4.0 Requirement 9.9.
 
-Provide thorough, technically descriptive explanations of the root cause, coupling mechanisms, and hardware attack surface. Keep string values formatted on a single continuous line without unescaped literal newlines.
-
-CRITICAL OUTPUT CONSTRAINTS:
+CRITICAL DENSITY RULES:
 - Output MUST be valid, raw RFC 8259 JSON starting with '{' and ending with '}'.
-- Do NOT wrap output in markdown code blocks.
-- Do NOT include any introductory or conversational text.
+- Do NOT wrap output in markdown code blocks. No intro or conversational filler.
+- Keep string values formatted on a single continuous line without unescaped literal newlines.
+- Be forensically precise but compact: limit each text field to 1-2 dense sentences (max 40 words per field).
 
 Respond ONLY with valid JSON matching this exact schema:
 {
@@ -18,17 +17,17 @@ Respond ONLY with valid JSON matching this exact schema:
   "confidence": 0.0 - 1.0,
   "compromised_vector": "ISO/IEC 7816-3 Smart Card Interface" | "Physical Chassis Perimeter / Ambient Mesh Sensor" | "SPI/UART Data Bus" | "External Ambient Environment",
   "risk_level": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
-  "risk_justification": "Detailed justification evaluating CVSS impact, plaintext credential exposure (Track-2 equivalent data, offline PIN), and breach of PCI physical tamper boundaries.",
-  "pci_containment_action": "Comprehensive containment directives specifying immediate hardware and acquirer actions (e.g., TR-31 / DUKPT Future Key zeroization, transaction cryptogram ARQC invalidation, gateway token quarantine, or physical terminal decommission).",
+  "risk_justification": "1-2 sentences on CVSS impact, Track-2/PIN exposure, and tamper boundary status.",
+  "pci_containment_action": "1-2 sentences of directives (DUKPT zeroization, ARQC invalidation, quarantine).",
   "action": "LOCK_TERMINAL" | "ISOLATE_OFFLINE" | "FLAG_FOR_INSPECTION" | "IGNORE",
   "threat_diagnosis": [
-    "Root-cause physical/RF anomaly mechanism",
-    "Targeted cryptographic, bus, or transaction subsystem affected",
-    "Physical attacker proximity, implant footprint, or rogue hardware signature"
+    "Root-cause physical/RF anomaly mechanism (max 20 words)",
+    "Targeted cryptographic, bus, or transaction subsystem affected (max 20 words)",
+    "Attacker footprint or rogue signature (max 20 words)"
   ],
-  "forensic_analysis": "Comprehensive technical breakdown of physical side-channel emission.",
-  "pci_compliance_impact": "Direct analysis of non-compliance under PCI PTS v6.0 and PCI DSS v4.0.",
-  "rationale": "Concise executive forensic summary."
+  "forensic_analysis": "1-2 sentences detailing physical side-channel emission & coupling.",
+  "pci_compliance_impact": "1-2 sentences assessing non-compliance under PCI PTS v6.0 and PCI DSS v4.0.",
+  "rationale": "1-sentence executive forensic summary."
 }`;
 
 export function createFallbackVerdict(
@@ -232,12 +231,19 @@ function safeParseAgentResponse(rawText: string): AgentVerdict | null {
 }
 
 export async function evaluateWithAgent(metrics: WindowMetrics): Promise<AgentVerdict> {
-  // FIX 2D: Safe navigation on optional `metrics.spectral` properties
-  const spectralBins = metrics.spectral?.bins?.join(", ") ?? "N/A";
+  const spectralBins = (metrics.spectral?.bins ?? []).map((b: number) => b.toFixed(1)).join(", ");
   const peakIndex = metrics.spectral?.peakBinIndex ?? 0;
-  const peakPower = metrics.spectral?.peakBinPower ?? 0;
-  const spread = metrics.spectral?.spectralSpreadDb ?? 0;
-  const spikeStatus = metrics.spectral?.isNarrowbandSpike ? "CONFIRMED" : "NEGATIVE";
+  const peakPower = metrics.spectral?.peakBinPower?.toFixed(1) ?? "-65.0";
+  const spread = metrics.spectral?.spectralSpreadDb?.toFixed(1) ?? "0.0";
+  const spikeStatus = metrics.spectral?.isNarrowbandSpike ? "CONFIRMED (Carrier Peak)" : "ABSENT (Flat Spectrum)";
+
+  // Reconstruct baseline from meanRssi and deltaDb
+  const baselineRssi = metrics.isAttenuationBreach
+    ? (metrics.meanRssi - metrics.deltaDb).toFixed(1)
+    : "-62.0";
+
+  const attenuationFactor = metrics.powerSurgeRatio ? `${metrics.powerSurgeRatio}x` : "1.0x";
+  const dropMagnitude = Math.abs(metrics.deltaDb).toFixed(1);
 
   // FIX 4B: Removed accidental newlines after labels in template literal
   const userContext = `HARDWARE TELEMETRY EVENT CONTEXT:
@@ -246,14 +252,18 @@ export async function evaluateWithAgent(metrics: WindowMetrics): Promise<AgentVe
 - 8-Point Downsampled FFT Spectrum (dBm): [${spectralBins}]
 - Dominant Harmonic: Bin ${peakIndex} @ ${peakPower} dBm (+${spread} dB spread)
 - Narrowband Spike Status: ${spikeStatus}
-- Active Channel Power (RSSI): ${metrics.meanRssi} dBm (Active Variance:${metrics.variance} dBm²)
+- Active Channel Power (RSSI): ${metrics.meanRssi.toFixed(2)} dBm (Active Variance: ${metrics.variance.toFixed(2)} dBm²)
 - Anomaly Classification Vector: ${
     metrics.isAttenuationBreach
-      ? `LOWER ATTENUATION BREACH (< -82.0 dBm). Signal collapsed to ${metrics.meanRssi} dBm across all bins.`
-      : `UPPER HARMONIC BREACH (> -38.0 dBm). Surge: +${metrics.deltaDb} dB (~${metrics.powerSurgeRatio}x power).`
+      ? `LOWER ATTENUATION BREACH (< -82.0 dBm). Signal collapsed from baseline ~${baselineRssi} dBm to${metrics.meanRssi.toFixed(2)} dBm (-${dropMagnitude} dB / ~${attenuationFactor} power attenuation). Indicates physical Faraday shielding, RF absorbing baffle enclosure, or offline isolation to blind telemetry while executing offline side-channel / chip extraction.`
+      : `UPPER HARMONIC BREACH (> -38.0 dBm). Surge: +${metrics.deltaDb.toFixed(1)} dB (~${attenuationFactor} power increase). Indicates parasitic transmitter coupling, shimmer tap, or rogue active beacon.`
   }
-- Target Bus Active: ISO/IEC 7816-3 contact lines
-- Sustained Window Duration: ${metrics.durationSec}s (${metrics.sampleCount} total samples)
+- Target Bus Active: ${
+    metrics.isAttenuationBreach
+      ? "Physical Chassis Perimeter / Ambient Mesh Sensor (Complete terminal perimeter enveloped)"
+      : "ISO/IEC 7816-3 contact lines"
+  }
+- Sustained Window Duration: ${metrics.durationSec.toFixed(2)}s (${metrics.sampleCount} total samples, uninterrupted suppression)
 - Heuristic Pre-Classifier: ${metrics.likelyType}`;
 
   const targetUrl = process.env.AGENT_ENDPOINT_URL || "https://ws.akamai-workshops.com/v1/chat/completions";
@@ -264,7 +274,7 @@ export async function evaluateWithAgent(metrics: WindowMetrics): Promise<AgentVe
     const res = await fetch(targetUrl, {
       method: "POST",
       // FIX 4A: 10-second timeout to prevent dangling connection leaks
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(25000),
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
@@ -276,7 +286,7 @@ export async function evaluateWithAgent(metrics: WindowMetrics): Promise<AgentVe
           { role: "user", content: userContext },
         ],
         temperature: 0.15,
-        max_tokens: 1800,
+        max_tokens: 1000,
         response_format: { type: "json_object" },
       }),
     });

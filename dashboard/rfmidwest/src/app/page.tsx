@@ -9,13 +9,30 @@ import {
   YAxis,
   ResponsiveContainer,
   Tooltip,
-  ReferenceLine,
 } from 'recharts';
-import { useSharedWebSocket, IncidentAlertPayload, WebSocketMessage } from '@/hooks/webSocketConnection';
+import { useSharedWebSocket } from '@/hooks/webSocketConnection';
 
 interface SpectrumPoint {
   mhz: number;
   dbm: number;
+}
+
+export interface IncidentAlertPayload {
+  event: 'INCIDENT_ALERT';
+  incidentId: number;
+  deviceId: string;
+  timestamp: number;
+  status: string;
+  verdict?: {
+    threat_type?: string;
+    confidence?: number;
+    rationale?: string;
+    action?: string;
+    risk_level?: string;
+    compromised_vector?: string;
+    risk_justification?: string;
+    pci_containment_action?: string;
+  };
 }
 
 export default function Home() {
@@ -23,6 +40,7 @@ export default function Home() {
   const [spectrumData, setSpectrumData] = useState<SpectrumPoint[]>([]);
   const [peakRssi, setPeakRssi] = useState<number | null>(null);
   const [activeDeviceId, setActiveDeviceId] = useState<string>('pos_terminal_01');
+  const [ingestStatus, setIngestStatus] = useState<string>('ACTIVE');
   const [incidents, setIncidents] = useState<IncidentAlertPayload[]>([]);
 
   const { isConnected, lastMessage } = useSharedWebSocket();
@@ -31,16 +49,38 @@ export default function Home() {
     setIsMounted(true);
   }, []);
 
-  // Ingest incoming FFT / Spectrum packets
-  useEffect(() => {
-    if (!lastMessage) return;
+  // Ingest incoming FFT / Spectrum, Incidents, and Ingest Status changes
+  // Robust incident ingest handler
+useEffect(() => {
+  if (!lastMessage) return;
 
-    const payload = lastMessage as any; // Cast loosely to support snake_case and camelCase
+  // 1. Ensure payload is parsed JSON
+  let rawPayload: any = lastMessage;
+  if (typeof lastMessage === 'string') {
+    try {
+      rawPayload = JSON.parse(lastMessage);
+    } catch (err) {
+      console.error('Failed to parse WebSocket message:', err);
+      return;
+    }
+  }
+
+  // 2. Normalize batch replays vs single frame into an array
+  let frames: any[] = [];
+  if (Array.isArray(rawPayload)) {
+    frames = rawPayload;
+  } else if (rawPayload.event === 'INCIDENT_HISTORY' && Array.isArray(rawPayload.incidents || rawPayload.data)) {
+    frames = rawPayload.incidents || rawPayload.data;
+  } else {
+    frames = [rawPayload];
+  }
+
+  frames.forEach((payload) => {
+    if (!payload || typeof payload !== 'object') return;
 
     if (payload.event === 'TELEMETRY_POINT') {
-      if (payload.device_id || payload.deviceId) {
-        setActiveDeviceId(payload.device_id || payload.deviceId);
-      }
+      const devId = payload.deviceId || payload.device_id;
+      if (devId) setActiveDeviceId(devId);
 
       if (typeof payload.rssi === 'number') {
         setPeakRssi(payload.rssi);
@@ -52,25 +92,52 @@ export default function Home() {
             mhz: parseFloat(freqKey.replace(/M/i, '').trim()),
             dbm: Number(powerVal),
           }))
-          // Must be sorted in ascending order for clean SVG rendering
           .sort((a, b) => a.mhz - b.mhz);
 
-        if (parsed.length > 0) {
-          setSpectrumData(parsed);
-        }
+        if (parsed.length > 0) setSpectrumData(parsed);
       }
-    } else if (payload.event === 'INCIDENT_ALERT') {
-      setIncidents((prevIncidents) => {
-        // Optional: Prevent duplicate entries if the socket resends the same ID
-        const exists = prevIncidents.some((inc) => inc.incidentId === payload.incidentId);
-        if (exists) return prevIncidents;
+    } 
+    else if (payload.event === 'INCIDENT_ALERT' || payload.event === 'INCIDENT_REPLAY' || payload.incidentId || payload.incident_id) {
+      // Normalize identifier and nested fields
+      const normIncidentId = payload.incidentId ?? payload.incident_id ?? payload.id ?? Date.now();
+      const normDeviceId = payload.deviceId ?? payload.device_id ?? 'unknown_device';
+      const normTimestamp = payload.timestamp 
+        ? (payload.timestamp > 1e11 ? payload.timestamp / 1000 : payload.timestamp) 
+        : Date.now() / 1000;
 
-        return [payload, ...prevIncidents];
+      const normalizedIncident: IncidentAlertPayload = {
+        event: 'INCIDENT_ALERT',
+        incidentId: Number(normIncidentId),
+        deviceId: normDeviceId,
+        timestamp: normTimestamp,
+        status: payload.status ?? 'FLAGGED',
+        verdict: {
+          threat_type: payload.verdict?.threat_type ?? payload.threat_type ?? 'UNKNOWN_ANOMALY',
+          confidence: payload.verdict?.confidence ?? payload.confidence,
+          rationale: payload.verdict?.rationale ?? payload.rationale ?? payload.verdict?.risk_justification,
+          action: payload.verdict?.action ?? payload.action ?? payload.verdict?.pci_containment_action,
+          risk_level: payload.verdict?.risk_level ?? payload.risk_level,
+        },
+      };
+
+      setIncidents((prev) => {
+        // Prevent duplicate IDs from re-renders or multiple socket reconnects
+        if (prev.some((item) => item.incidentId === normalizedIncident.incidentId)) {
+          return prev;
+        }
+        return [normalizedIncident, ...prev];
       });
     }
-  }, [lastMessage]);
+  });
+}, [lastMessage]);
 
-  const getRiskBadgeColor = (risk: string) => {
+  const getRiskBadgeColor = (risk?: string, confidence?: number) => {
+    if (confidence !== undefined) {
+      if (confidence >= 0.9) return 'bg-red-500/10 text-red-400 border-red-500/20';
+      if (confidence >= 0.7) return 'bg-orange-500/10 text-orange-400 border-orange-500/20';
+      return 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20';
+    }
+
     switch (risk?.toUpperCase()) {
       case 'CRITICAL':
         return 'bg-red-500/10 text-red-400 border-red-500/20';
@@ -83,7 +150,6 @@ export default function Home() {
     }
   };
 
-  // Compute peak frequency bin dynamically
   const peakPoint = useMemo(() => {
     if (spectrumData.length === 0) return null;
     return spectrumData.reduce((prev, curr) => (curr.dbm > prev.dbm ? curr : prev));
@@ -113,12 +179,14 @@ export default function Home() {
             <span>BANDWIDTH: <strong className="text-zinc-200">47.20 MHz – 49.20 MHz</strong></span>
             <span className="text-zinc-600">|</span>
             <span>RESOLUTION: <strong className="text-zinc-200">{spectrumData.length} BINS</strong></span>
+            <span className="text-zinc-600">|</span>
+            <span>INGEST: <strong className="text-cyan-400 uppercase">{ingestStatus}</strong></span>
           </div>
 
           <div className="flex items-center gap-4">
             {peakPoint && (
               <span>
-                PEAK CARRIER: <strong className="text-cyan-400">{peakPoint.mhz.toFixed(2)} MHz</strong> ({peakPoint.dbm.toFixed(1)} dBm)
+                PEAK CARRIER: <strong className="text-cyan-400">{peakPoint.mhz.toFixed(3)} MHz</strong> ({peakPoint.dbm.toFixed(1)} dBm)
               </span>
             )}
             {peakRssi !== null && (
@@ -140,7 +208,6 @@ export default function Home() {
             <ResponsiveContainer width="100%" height="100%">
               <AreaChart data={spectrumData} margin={{ top: 12, right: 16, left: -10, bottom: 0 }}>
                 <defs>
-                  {/* Subtle SDR Waterfall-style area fill under the spectrum trace */}
                   <linearGradient id="sdrGradient" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stopColor="#22d3ee" stopOpacity={0.35} />
                     <stop offset="60%" stopColor="#0891b2" stopOpacity={0.12} />
@@ -148,16 +215,15 @@ export default function Home() {
                   </linearGradient>
                 </defs>
 
-                {/* Dark, subtle SDR measurement grid */}
                 <CartesianGrid stroke="#1e293b" strokeDasharray="1 1" opacity={0.6} />
 
-                {/* Frequency Domain X-Axis */}
+                {/* Frequency Domain X-Axis (3-decimal place precision) */}
                 <XAxis
                   type="number"
                   dataKey="mhz"
                   domain={[47.2, 49.2]}
                   ticks={xTicks}
-                  tickFormatter={(val) => `${val.toFixed(1)}M`}
+                  tickFormatter={(val) => `${Number(val).toFixed(3)} MHz`}
                   stroke="#475569"
                   tick={{ fill: '#94a3b8', fontSize: 11, fontFamily: 'monospace' }}
                   axisLine={{ stroke: '#334155' }}
@@ -174,7 +240,6 @@ export default function Home() {
                   tickFormatter={(val) => `${val}`}
                 />
 
-                {/* SDR Tooltip */}
                 <Tooltip
                   isAnimationActive={false}
                   contentStyle={{
@@ -189,7 +254,6 @@ export default function Home() {
                   labelFormatter={(label) => `${Number(label).toFixed(3)} MHz`}
                 />
 
-                {/* Spectrum Curve */}
                 <Area
                   type="linear"
                   dataKey="dbm"
@@ -203,75 +267,90 @@ export default function Home() {
             </ResponsiveContainer>
           )}
         </div>
+
         {/* Incident List Container */}
-              <div className="w-full px-6 mx-auto space-y-4">
-                {incidents.length === 0 ? (
-                  <div className="text-center py-16 bg-slate-900/40 rounded-xl border border-slate-900">
-                    <p className="text-slate-400 text-sm">No incidents recorded yet.</p>
-                    <p className="text-slate-600 text-xs mt-1">Listening for incoming INCIDENT_ALERT payloads...</p>
-                  </div>
-                ) : (
-                  incidents.map((incident) => (
-                    <div
-                      key={incident.incidentId}
-                      className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-lg transition-all hover:border-slate-700"
-                    >
-                      {/* Card Header */}
-                      <div className="flex items-center justify-between mb-4">
-                        <div className="flex items-center space-x-3">
-                          <span className="text-sm font-bold text-red-400 uppercase tracking-wide">
-                            Incident #{incident.incidentId}
-                          </span>
-                          <span className="text-xs text-slate-400">
-                            Device: <strong className="text-slate-200">{incident.deviceId}</strong>
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <span className={`text-xs font-bold px-2.5 py-0.5 rounded-full border ${getRiskBadgeColor(incident.verdict.risk_level)}`}>
-                            {incident.verdict.risk_level}
-                          </span>
-                          <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-red-500/20 text-red-300 border border-red-500/30">
-                            {incident.status}
-                          </span>
-                        </div>
-                      </div>
+        <div className="w-full px-6 mx-auto space-y-4">
+          {incidents.length === 0 ? (
+            <div className="text-center py-16 bg-slate-900/40 rounded-xl border border-slate-900">
+              <p className="text-slate-400 text-sm">No incidents recorded yet.</p>
+              <p className="text-slate-600 text-xs mt-1">Listening for incoming INCIDENT_ALERT payloads...</p>
+            </div>
+          ) : (
+            incidents.map((incident) => {
+              const threatType = incident.verdict?.threat_type ?? 'UNKNOWN_ANOMALY';
+              const confidence = incident.verdict?.confidence;
+              const rationale = incident.verdict?.rationale ?? incident.verdict?.risk_justification ?? 'No rationale recorded.';
+              const action = incident.verdict?.action ?? incident.verdict?.pci_containment_action ?? 'NO_ACTION_SPECIFIED';
 
-                      {/* Threat Details */}
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-slate-950/50 p-4 rounded-lg border border-slate-800/60 mb-4">
-                        <div>
-                          <p className="text-xs text-slate-400">Threat Type</p>
-                          <p className="text-sm font-semibold text-slate-200">{incident.verdict.threat_type}</p>
-                        </div>
-                        <div>
-                          <p className="text-xs text-slate-400">Compromised Vector</p>
-                          <p className="text-xs font-mono text-amber-400 mt-0.5">{incident.verdict.compromised_vector}</p>
-                        </div>
-                      </div>
-
-                      {/* Justification */}
-                      <p className="text-xs text-slate-300 mb-4 leading-relaxed">
-                        {incident.verdict.risk_justification}
-                      </p>
-
-                      {/* Action Banner */}
-                      <div className="bg-red-950/20 border border-red-500/20 p-3 rounded-lg flex items-center justify-between text-xs">
-                        <div>
-                          <span className="text-red-400 font-bold uppercase tracking-wider">Containment Action: </span>
-                          <span className="text-slate-200 font-mono ml-1">{incident.verdict.pci_containment_action}</span>
-                        </div>
-                        <span className="bg-red-600 text-white font-bold px-3 py-1 rounded shadow">
-                          {incident.verdict.action}
-                        </span>
-                      </div>
-
-                      {/* Timestamp Footer */}
-                      <div className="mt-4 pt-3 border-t border-slate-800/80 flex justify-end text-xs text-slate-500">
-                        {new Date(incident.timestamp * 1000).toLocaleString()}
-                      </div>
+              return (
+                <div
+                  key={incident.incidentId}
+                  className="bg-slate-900 border border-slate-800 rounded-xl p-6 shadow-lg transition-all hover:border-slate-700"
+                >
+                  {/* Card Header */}
+                  <div className="flex items-center justify-between mb-4">
+                    <div className="flex items-center space-x-3">
+                      <span className="text-sm font-bold text-red-400 uppercase tracking-wide">
+                        Incident #{incident.incidentId}
+                      </span>
+                      <span className="text-xs text-slate-400">
+                        Device: <strong className="text-slate-200">{incident.deviceId ?? activeDeviceId}</strong>
+                      </span>
                     </div>
-                  ))
-                )}
-              </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`text-xs font-bold px-2.5 py-0.5 rounded-full border ${getRiskBadgeColor(incident.verdict?.risk_level, confidence)}`}>
+                        {confidence !== undefined
+                          ? `${(confidence * 100).toFixed(0)}% CONFIDENCE`
+                          : (incident.verdict?.risk_level ?? 'FLAGGED')}
+                      </span>
+                      <span className="text-xs font-semibold px-2.5 py-0.5 rounded-full bg-red-500/20 text-red-300 border border-red-500/30">
+                        {incident.status ?? 'ALERT'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Threat Details Grid */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 bg-slate-950/50 p-4 rounded-lg border border-slate-800/60 mb-4">
+                    <div>
+                      <p className="text-xs text-slate-400">Threat Type</p>
+                      <p className="text-sm font-semibold text-slate-200 font-mono mt-0.5">{threatType}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-400">Confidence Score</p>
+                      <p className="text-xs font-mono text-amber-400 mt-1">
+                        {confidence !== undefined ? `${(confidence * 100).toFixed(1)}% (${confidence})` : 'N/A'}
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Rationale */}
+                  <div className="mb-4">
+                    <p className="text-xs text-slate-400 mb-1">Detection Rationale</p>
+                    <p className="text-xs text-slate-300 leading-relaxed font-mono bg-slate-950/30 p-3 rounded border border-slate-800/40">
+                      {rationale}
+                    </p>
+                  </div>
+
+                  {/* Action Banner */}
+                  <div className="bg-red-950/20 border border-red-500/20 p-3 rounded-lg flex items-center justify-between text-xs">
+                    <div>
+                      <span className="text-red-400 font-bold uppercase tracking-wider">Containment Action: </span>
+                      <span className="text-slate-200 font-mono ml-1">{action}</span>
+                    </div>
+                    <span className="bg-red-600 text-white font-bold px-3 py-1 rounded shadow uppercase">
+                      {action}
+                    </span>
+                  </div>
+
+                  {/* Timestamp Footer */}
+                  <div className="mt-4 pt-3 border-t border-slate-800/80 flex justify-end text-xs text-slate-500 font-mono">
+                    {incident.timestamp ? new Date(incident.timestamp * 1000).toLocaleString() : 'N/A'}
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
       </main>
     </div>
   );

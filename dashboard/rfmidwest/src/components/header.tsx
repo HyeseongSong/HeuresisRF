@@ -12,10 +12,7 @@ import {
   RotateCcw,
   Sparkles,
 } from 'lucide-react';
-import { 
-  useSharedWebSocket,
-  WebSocketMessage 
-} from '@/hooks/webSocketConnection';
+import { useSharedWebSocket } from '@/hooks/webSocketConnection';
 
 interface HeaderProps {
   onResetAlarm?: () => void;
@@ -37,12 +34,18 @@ const DEFAULT_STATUS_CONFIG: StatusConfig = {
   icon: <ShieldCheck className="w-5 h-5 text-emerald-400" />,
 };
 
+const FALSE_POSITIVE_STATUS_CONFIG: StatusConfig = {
+  title: 'BENIGN FLUCTUATION // FALSE POSITIVE',
+  subtitle: 'Agent Discarded Transient Signal Spike',
+  bgColor: 'bg-emerald-950/60 border-emerald-500/70 text-emerald-200',
+  pulseColor: 'bg-emerald-400',
+  icon: <ShieldCheck className="w-5 h-5 text-emerald-400" />,
+};
+
 export default function Header({ onResetAlarm }: HeaderProps) {
-  console.log('[DEBUG] Rendering Header component');
   const [isMounted, setIsMounted] = useState(false);
   const { isConnected, lastMessage } = useSharedWebSocket();
 
-  // Internal persistent component state
   const [isSecure, setIsSecure] = useState(true);
   const [isAiAnalyzing, setIsAiAnalyzing] = useState(false);
   const [formattedTimestamp, setFormattedTimestamp] = useState('AWAITING');
@@ -54,14 +57,20 @@ export default function Header({ onResetAlarm }: HeaderProps) {
     setIsMounted(true);
   }, []);
 
-  // Update component state whenever a new WebSocket message arrives
   useEffect(() => {
     if (!lastMessage) return;
 
-    const payload = lastMessage as WebSocketMessage;
+    let payload: any = lastMessage;
+    if (typeof payload === 'string') {
+      try {
+        payload = JSON.parse(payload);
+      } catch {
+        return;
+      }
+    }
 
-    if ('deviceId' in payload && payload.deviceId) {
-      setActiveDeviceId(payload.deviceId);
+    if (payload.deviceId || payload.device_id) {
+      setActiveDeviceId(payload.deviceId || payload.device_id);
     }
 
     switch (payload.event) {
@@ -81,25 +90,56 @@ export default function Header({ onResetAlarm }: HeaderProps) {
         setIsSecure(false);
         setIsAiAnalyzing(true);
         setStatusConfig({
-          title: payload.heuristic.likelyType,
-          subtitle: 'Potential Incident Detected',
+          title: payload.heuristic?.likelyType ?? 'RF ANOMALY DETECTED',
+          subtitle: 'Active EM Breach // Akamai Agent Analyzing...',
           bgColor: 'bg-amber-950/80 border-amber-500 text-amber-200',
           pulseColor: 'bg-amber-500',
           icon: <ShieldAlert className="w-5 h-5 text-amber-400 animate-bounce" />,
         });
         break;
 
-      case 'INCIDENT_ALERT':
-        setIsSecure(false);
+      case 'INCIDENT_ALERT': {
+        // Do not flip live header state if this frame is a historical replay
+        if (payload.isReplay) return;
+
         setIsAiAnalyzing(false);
+
+        // Safe extraction of threat type
+        const threatTitle = (
+          payload.verdict?.threat_type ||
+          payload.threat_type ||
+          payload.classification ||
+          'UNKNOWN_ANOMALY'
+        ).toUpperCase();
+
+        // If the LLM/Classifier marked it as a false positive or benign noise
+        const isFalsePositive =
+          threatTitle === 'FALSE_POSITIVE' ||
+          threatTitle === 'BENIGN' ||
+          threatTitle === 'NOISE_ARTIFACT' ||
+          payload.status === 'BENIGN' ||
+          payload.status === 'FALSE_POSITIVE';
+
+        if (isFalsePositive) {
+          setIsSecure(true);
+          setStatusConfig(FALSE_POSITIVE_STATUS_CONFIG);
+          return;
+        }
+
+        // Genuine threat breach
+        setIsSecure(false);
+        const containmentAction =
+          payload.verdict?.action ?? payload.actionTaken ?? 'LOCK_TERMINAL';
+
         setStatusConfig({
-          title: payload.status,
-          subtitle: 'Threat Detected',
-          bgColor: 'bg-amber-950/80 border-amber-500 text-amber-200',
-          pulseColor: 'bg-amber-500',
-          icon: <ShieldAlert className="w-5 h-5 text-amber-400 animate-bounce" />,
+          title: threatTitle,
+          subtitle: `Active Breach // Containment: ${containmentAction}`,
+          bgColor: 'bg-rose-950/80 border-rose-500 text-rose-200',
+          pulseColor: 'bg-rose-500',
+          icon: <ShieldAlert className="w-5 h-5 text-rose-400 animate-pulse" />,
         });
         break;
+      }
 
       case 'STATUS_RECOVERED':
         setIsSecure(true);
@@ -123,7 +163,6 @@ export default function Header({ onResetAlarm }: HeaderProps) {
   return (
     <header className="sticky top-0 z-50 w-full border-b border-zinc-800 bg-zinc-950/90 backdrop-blur-md px-4 py-3 sm:px-6 transition-colors duration-300">
       <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between max-w-[1720px] mx-auto">
-        
         {/* Brand & Terminal Target */}
         <div className="flex items-center gap-3">
           <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-zinc-900 border border-zinc-700/80 shadow-inner">
@@ -180,7 +219,6 @@ export default function Header({ onResetAlarm }: HeaderProps) {
 
         {/* Diagnostics Pills */}
         <div className="flex flex-wrap items-center gap-2 font-mono text-xs">
-          
           {/* Target Terminal Pill */}
           <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300">
             <Cpu className="w-3.5 h-3.5 text-zinc-400" />
@@ -227,9 +265,7 @@ export default function Header({ onResetAlarm }: HeaderProps) {
               </>
             )}
           </div>
-
         </div>
-
       </div>
     </header>
   );

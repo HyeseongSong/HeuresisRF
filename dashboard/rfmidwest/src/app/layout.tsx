@@ -26,7 +26,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
-        <WebSocketProvider url="placeholder/egress">
+        <WebSocketProvider url="http://173.255.199.123/egress">
           <Header />
           {children}
         </WebSocketProvider>

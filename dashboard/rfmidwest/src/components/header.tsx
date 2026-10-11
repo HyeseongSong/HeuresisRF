@@ -1,6 +1,6 @@
-// components/header.tsx
 'use client';
 
+import { useState, useEffect } from 'react';
 import { 
   ShieldCheck, 
   ShieldAlert, 
@@ -13,7 +13,6 @@ import {
   Sparkles
 } from 'lucide-react';
 import { useSharedWebSocket } from '@/hooks/webSocketConnection';
-
 
 export type TamperState = 'SECURE' | 'BREACH_UPPER' | 'BREACH_LOWER';
 
@@ -31,7 +30,6 @@ interface HeaderProps {
 export default function Header({
   status = 'SECURE',
   deviceId = 'pos_terminal_01',
-  isWsConnected = true, // remove
   currentRssi = -58.4,
   pMax = -55.0,
   pMin = -85.0,
@@ -40,8 +38,25 @@ export default function Header({
 }: HeaderProps) {
   const isAlarm = status !== 'SECURE';
 
+  // Prevent SSR evaluation crashes by verifying client mounting
+  const [isMounted, setIsMounted] = useState(false);
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
   const { isConnected, lastMessage } = useSharedWebSocket();
-  
+
+  // Safely fallback to prop default before initial WS frame arrives or during SSR
+  const activeDeviceId = (isMounted && lastMessage?.device_id) ? lastMessage.device_id : deviceId;
+
+  const formattedTimestamp = isMounted && lastMessage?.timestamp 
+    ? new Date(lastMessage.timestamp * 1000).toLocaleTimeString('en-US', {
+        hour12: false,
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      })
+    : 'AWAITING...';
 
   const getStatusBadge = () => {
     switch (status) {
@@ -121,7 +136,7 @@ export default function Header({
             </div>
           </div>
 
-          {/* Reset / Silence Button for Hackathon Live Demo */}
+          {/* Reset / Silence Button */}
           {isAlarm && onResetAlarm && (
             <button
               onClick={onResetAlarm}
@@ -133,36 +148,20 @@ export default function Header({
           )}
         </div>
 
-        {/* Edge, Cloud & Agent Infrastructure Diagnostics */}
+        {/* Diagnostics Pills */}
         <div className="flex flex-wrap items-center gap-2 font-mono text-xs">
           
           {/* Target Terminal Pill */}
           <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300">
             <Cpu className="w-3.5 h-3.5 text-zinc-400" />
             <span className="text-zinc-500">TARGET:</span>
-            {/* <span className="text-zinc-200 font-semibold">{deviceId}</span> */}
-            <span className="text-zinc-200 font-semibold">{lastMessage.device_id}</span>
+            <span className="text-zinc-200 font-semibold">{activeDeviceId}</span>
           </div>
 
-          {/* Live RSSI Telemetry Pill */}
-          {/* <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300">
-            <span className="text-zinc-500">PWR:</span>
-            <span className={`font-semibold ${
-              currentRssi !== null && currentRssi > pMax 
-                ? 'text-rose-400 font-bold' 
-                : currentRssi !== null && currentRssi < pMin 
-                ? 'text-amber-400 font-bold' 
-                : 'text-emerald-400'
-            }`}>
-              {currentRssi !== null ? `${currentRssi.toFixed(1)} dBm` : '-- dBm'}
-            </span>
-          </div> */}
-
-          {/* Live RSSI Timestamp Pill */}
+          {/* Live Timestamp Pill */}
           <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300">
-            <span className="text-zinc-500">Timestamp:</span>
-            {/* <span className="text-zinc-200 font-semibold">Timestamp</span> */}
-            <span className="text-zinc-200 font-semibold">lastMessage.timestamp</span>
+            <span className="text-zinc-500">TS:</span>
+            <span className="text-zinc-200 font-semibold">{formattedTimestamp}</span>
           </div>
 
           {/* Akamai Hosted Agent Pill */}
@@ -181,13 +180,11 @@ export default function Header({
 
           {/* WebSocket Ingestion Link */}
           <div className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border ${
-            // isWsConnected 
-            isConnected 
+            isMounted && isConnected 
               ? 'bg-zinc-900 border-zinc-800 text-zinc-300' 
               : 'bg-rose-950/50 border-rose-800 text-rose-300'
           }`}>
-            {/* {isWsConnected ? ( */}
-            {isConnected ? (
+            {isMounted && isConnected ? (
               <>
                 <Wifi className="w-3.5 h-3.5 text-emerald-400" />
                 <span className="text-zinc-500">GATEWAY:</span>

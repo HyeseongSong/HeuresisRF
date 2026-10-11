@@ -1,9 +1,9 @@
 // components/providers.tsx
-'use client';
+"use client";
 
-import { WebSocketProvider } from "@/hooks/webSocketConnection";
+import type { ReactNode } from "react";
 import Header from "@/components/header";
-import { ReactNode } from "react";
+import { WebSocketProvider } from "@/hooks/webSocketConnection";
 
 export function Providers({ children }: { children: ReactNode }) {
   return (

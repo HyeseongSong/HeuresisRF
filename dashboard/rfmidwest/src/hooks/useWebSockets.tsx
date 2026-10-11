@@ -1,7 +1,7 @@
 // src/hooks/useWebSockets.tsx
-'use client';
+"use client";
 
-import { useEffect, useRef, useState, useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from "react";
 
 interface UseWebSocketOptions {
   url: string;
@@ -26,7 +26,9 @@ export function useWebSocket({
 }: UseWebSocketOptions) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectAttemptsRef = useRef(0);
-  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
 
   // Tracks explicit manual disconnection
   const isManuallyClosedRef = useRef(false);
@@ -63,26 +65,28 @@ export function useWebSocket({
             socket?.close();
             return;
           }
-          console.log('[WS CLIENT] Connection established successfully');
+          console.log("[WS CLIENT] Connection established successfully");
           setIsConnected(true);
           reconnectAttemptsRef.current = 0;
           callbacksRef.current.onConnect?.();
         };
 
         socket.onmessage = (event) => {
-          console.log('[RAW WS INCOMING FRAME]:', event.data);
+          console.log("[RAW WS INCOMING FRAME]:", event.data);
           if (didCancel) return;
           try {
             const parsedData = JSON.parse(event.data);
             setLastMessage(parsedData);
             callbacksRef.current.onMessage?.(parsedData);
           } catch (error) {
-            console.error('[WS CLIENT] Failed to parse message JSON:', error);
+            console.error("[WS CLIENT] Failed to parse message JSON:", error);
           }
         };
 
         socket.onclose = (event) => {
-          console.warn(`[WS CLIENT] Closed (code: ${event.code}, reason: "${event.reason}")`);
+          console.warn(
+            `[WS CLIENT] Closed (code: ${event.code}, reason: "${event.reason}")`,
+          );
           wsRef.current = null;
           setIsConnected(false);
 
@@ -90,24 +94,30 @@ export function useWebSocket({
           if (!didCancel && !isManuallyClosedRef.current) {
             callbacksRef.current.onDisconnect?.();
 
-            if (reconnect && reconnectAttemptsRef.current < maxReconnectAttempts) {
+            if (
+              reconnect &&
+              reconnectAttemptsRef.current < maxReconnectAttempts
+            ) {
               reconnectAttemptsRef.current += 1;
               console.log(
-                `[WS CLIENT] Reconnecting attempt ${reconnectAttemptsRef.current}/${maxReconnectAttempts} in ${reconnectInterval}ms...`
+                `[WS CLIENT] Reconnecting attempt ${reconnectAttemptsRef.current}/${maxReconnectAttempts} in ${reconnectInterval}ms...`,
               );
-              reconnectTimeoutRef.current = setTimeout(openConnection, reconnectInterval);
+              reconnectTimeoutRef.current = setTimeout(
+                openConnection,
+                reconnectInterval,
+              );
             }
           }
         };
 
         socket.onerror = (error) => {
           if (!didCancel) {
-            console.error('[WS CLIENT] Error event:', error);
+            console.error("[WS CLIENT] Error event:", error);
             callbacksRef.current.onError?.(error);
           }
         };
       } catch (err) {
-        console.error('[WS CLIENT] Initialization error:', err);
+        console.error("[WS CLIENT] Initialization error:", err);
       }
     }
 
@@ -129,7 +139,10 @@ export function useWebSocket({
         socket.onclose = null;
         socket.onerror = null;
 
-        if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+        if (
+          socket.readyState === WebSocket.OPEN ||
+          socket.readyState === WebSocket.CONNECTING
+        ) {
           socket.close();
         }
         socket = null;
@@ -163,10 +176,10 @@ export function useWebSocket({
 
   const sendMessage = useCallback((data: unknown) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      const payload = typeof data === 'string' ? data : JSON.stringify(data);
+      const payload = typeof data === "string" ? data : JSON.stringify(data);
       wsRef.current.send(payload);
     } else {
-      console.warn('[WS CLIENT] Cannot send message: WebSocket is not open.');
+      console.warn("[WS CLIENT] Cannot send message: WebSocket is not open.");
     }
   }, []);
 

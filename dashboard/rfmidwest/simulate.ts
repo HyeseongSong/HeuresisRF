@@ -24,10 +24,18 @@ socket.onopen = () => {
   console.log(`Connected to Ingest Socket: ${WS_URL}`);
   console.log("\n--- SDR Hardware Simulator Controls ---");
   console.log("Press [1] -> BASELINE (Ambient floor @ -54 to -58 dBm)");
-  console.log("Press [2] -> ATTACK: ROGUE SHIMMER (Continuous 48.78 MHz spike @ -24.5 dBm)");
-  console.log("Press [3] -> ATTACK: SHIELDING / TAMPER (All bins drop to -92 dBm)");
-  console.log("Press [4] -> NORMAL ACTION: Phone Tap / NFC (200ms wideband transient burst)");
-  console.log("Press [5] -> NORMAL ACTION: Legitimate EMV Chip Card (1.8s transaction @ -45 dBm)");
+  console.log(
+    "Press [2] -> ATTACK: ROGUE SHIMMER (Continuous 48.78 MHz spike @ -24.5 dBm)",
+  );
+  console.log(
+    "Press [3] -> ATTACK: SHIELDING / TAMPER (All bins drop to -92 dBm)",
+  );
+  console.log(
+    "Press [4] -> NORMAL ACTION: Phone Tap / NFC (200ms wideband transient burst)",
+  );
+  console.log(
+    "Press [5] -> NORMAL ACTION: Legitimate EMV Chip Card (1.8s transaction @ -45 dBm)",
+  );
   console.log("Press [Ctrl+C] -> Exit\n");
 
   setInterval(streamData, 100);
@@ -38,11 +46,11 @@ socket.onmessage = (event) => {
     const data = JSON.parse(event.data.toString());
     if (data.event === "INCIDENT_ALERT") {
       console.log(
-        `\n\x1b[31m[ALERT TRIGGERED]\x1b[0m ${data.verdict?.threat_type} | Action: ${data.verdict?.action} | Confidence: ${(data.verdict?.confidence * 100).toFixed(0)}%`
+        `\n\x1b[31m[ALERT TRIGGERED]\x1b[0m ${data.verdict?.threat_type} | Action: ${data.verdict?.action} | Confidence: ${(data.verdict?.confidence * 100).toFixed(0)}%`,
       );
     } else if (data.event === "STATUS_RECOVERED") {
       console.log(
-        `\n\x1b[32m[STATUS RECOVERED]\x1b[0m Terminal ${data.deviceId} restored to ${data.status}`
+        `\n\x1b[32m[STATUS RECOVERED]\x1b[0m Terminal ${data.deviceId} restored to ${data.status}`,
       );
     }
   } catch {
@@ -74,7 +82,7 @@ function generateSpectrum(): {
       const spikePower = -24.5; // Breaches P_MAX (-38.0 dBm)
 
       if (dist < 0.08) {
-        const attenuation = Math.exp(-Math.pow(dist / bandwidth, 2));
+        const attenuation = Math.exp(-((dist / bandwidth) ** 2));
         powerDbm = noise + (spikePower - noise) * attenuation;
       } else {
         powerDbm = noise;
@@ -89,7 +97,7 @@ function generateSpectrum(): {
       const dist = Math.abs(freqMhz - jitterCenter);
       const burstPeak = -32.0 + (Math.random() * 4.0 - 2.0); // Breaches power, but unstable & <300ms
 
-      const attenuation = Math.exp(-Math.pow(dist / 0.25, 2));
+      const attenuation = Math.exp(-((dist / 0.25) ** 2));
       const baseNoise = -55.0 + (Math.random() * 4.0 - 2.0);
       powerDbm = baseNoise + (burstPeak - baseNoise) * attenuation;
     } else if (currentMode === "CLEAN_CARD_TX") {
@@ -102,7 +110,7 @@ function generateSpectrum(): {
       const legitPower = -45.0; // Clean baseline power
 
       if (dist < 0.08) {
-        const attenuation = Math.exp(-Math.pow(dist / bandwidth, 2));
+        const attenuation = Math.exp(-((dist / bandwidth) ** 2));
         powerDbm = noise + (legitPower - noise) * attenuation;
       } else {
         powerDbm = noise;
@@ -120,7 +128,7 @@ function generateSpectrum(): {
       peakFreq = freqStr;
     }
 
-    sumLinearMilliwatts += Math.pow(10, val / 10);
+    sumLinearMilliwatts += 10 ** (val / 10);
   }
 
   // Handle auto-reversion for transient normal actions
@@ -151,7 +159,7 @@ function streamData() {
   socket.send(JSON.stringify(payload));
 
   process.stdout.write(
-    `\r[${currentMode.padEnd(16)}] RSSI: ${approxRssi.toFixed(1).padStart(6)} dBm | Peak: ${peakVal.toFixed(1)} dBm @ ${peakFreq}   `
+    `\r[${currentMode.padEnd(16)}] RSSI: ${approxRssi.toFixed(1).padStart(6)} dBm | Peak: ${peakVal.toFixed(1)} dBm @ ${peakFreq}   `,
   );
 }
 
@@ -180,17 +188,23 @@ if (process.stdin.isTTY) {
     if (key === "4") {
       currentMode = "NFC_PHONE_TAP";
       transientFramesRemaining = 2; // 2 frames @ 10 Hz = 200 ms
-      console.log("\n\n>>> Triggered: CONTACTLESS PHONE TAP (200ms transient wideband burst)");
+      console.log(
+        "\n\n>>> Triggered: CONTACTLESS PHONE TAP (200ms transient wideband burst)",
+      );
     }
     if (key === "5") {
       currentMode = "CLEAN_CARD_TX";
       transientFramesRemaining = 18; // 18 frames @ 10 Hz = 1.8s transaction
-      console.log("\n\n>>> Triggered: LEGITIMATE EMV CHIP CARD INSERTION (1.8s active transaction)");
+      console.log(
+        "\n\n>>> Triggered: LEGITIMATE EMV CHIP CARD INSERTION (1.8s active transaction)",
+      );
     }
     if (key === "6") {
       currentMode = "SHIELDING_ATTACK";
       transientFramesRemaining = 5; // 500 ms @ 10 Hz (less than the 1.2s required)
-      console.log("\n\n>>> Triggered: TRANSIENT SHADOWING (500ms momentary dip, e.g. metal cart passing)");
+      console.log(
+        "\n\n>>> Triggered: TRANSIENT SHADOWING (500ms momentary dip, e.g. metal cart passing)",
+      );
     }
   });
 }

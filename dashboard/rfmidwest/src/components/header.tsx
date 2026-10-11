@@ -1,18 +1,18 @@
-'use client';
+"use client";
 
-import { useState, useEffect } from 'react';
-import { 
-  ShieldCheck, 
-  ShieldAlert, 
-  Radio, 
-  Cpu, 
-  Cloud, 
-  Wifi, 
-  WifiOff, 
+import {
+  Cloud,
+  Cpu,
+  Radio,
   RotateCcw,
+  ShieldAlert,
+  ShieldCheck,
   Sparkles,
-} from 'lucide-react';
-import { useSharedWebSocket } from '@/hooks/webSocketConnection';
+  Wifi,
+  WifiOff,
+} from "lucide-react";
+import { useEffect, useState } from "react";
+import { useSharedWebSocket } from "@/hooks/webSocketConnection";
 
 interface HeaderProps {
   onResetAlarm?: () => void;
@@ -27,18 +27,18 @@ interface StatusConfig {
 }
 
 const DEFAULT_STATUS_CONFIG: StatusConfig = {
-  title: 'SYSTEM SECURE // EM RUNTIME BOUNDS OK',
-  subtitle: 'Active SDR Physical Layer Monitoring',
-  bgColor: 'bg-emerald-950/60 border-emerald-500/70 text-emerald-200',
-  pulseColor: 'bg-emerald-400',
+  title: "SYSTEM SECURE // EM RUNTIME BOUNDS OK",
+  subtitle: "Active SDR Physical Layer Monitoring",
+  bgColor: "bg-emerald-950/60 border-emerald-500/70 text-emerald-200",
+  pulseColor: "bg-emerald-400",
   icon: <ShieldCheck className="w-5 h-5 text-emerald-400" />,
 };
 
 const FALSE_POSITIVE_STATUS_CONFIG: StatusConfig = {
-  title: 'BENIGN FLUCTUATION // FALSE POSITIVE',
-  subtitle: 'Agent Discarded Transient Signal Spike',
-  bgColor: 'bg-emerald-950/60 border-emerald-500/70 text-emerald-200',
-  pulseColor: 'bg-emerald-400',
+  title: "BENIGN FLUCTUATION // FALSE POSITIVE",
+  subtitle: "Agent Discarded Transient Signal Spike",
+  bgColor: "bg-emerald-950/60 border-emerald-500/70 text-emerald-200",
+  pulseColor: "bg-emerald-400",
   icon: <ShieldCheck className="w-5 h-5 text-emerald-400" />,
 };
 
@@ -48,10 +48,12 @@ export default function Header({ onResetAlarm }: HeaderProps) {
 
   const [isSecure, setIsSecure] = useState(true);
   const [isAiAnalyzing, setIsAiAnalyzing] = useState(false);
-  const [formattedTimestamp, setFormattedTimestamp] = useState('AWAITING');
-  const [activeDeviceId, setActiveDeviceId] = useState('Waiting');
+  const [formattedTimestamp, setFormattedTimestamp] = useState("AWAITING");
+  const [activeDeviceId, setActiveDeviceId] = useState("Waiting");
   const [ingestOnline, setIngestOnline] = useState(true);
-  const [statusConfig, setStatusConfig] = useState<StatusConfig>(DEFAULT_STATUS_CONFIG);
+  const [statusConfig, setStatusConfig] = useState<StatusConfig>(
+    DEFAULT_STATUS_CONFIG,
+  );
 
   useEffect(() => {
     setIsMounted(true);
@@ -61,7 +63,7 @@ export default function Header({ onResetAlarm }: HeaderProps) {
     if (!lastMessage) return;
 
     let payload: any = lastMessage;
-    if (typeof payload === 'string') {
+    if (typeof payload === "string") {
       try {
         payload = JSON.parse(payload);
       } catch {
@@ -74,31 +76,35 @@ export default function Header({ onResetAlarm }: HeaderProps) {
     }
 
     switch (payload.event) {
-      case 'TELEMETRY_POINT':
+      case "TELEMETRY_POINT":
         if (payload.timestamp) {
-          const formatted = new Date(payload.timestamp * 1000).toLocaleTimeString('en-US', {
+          const formatted = new Date(
+            payload.timestamp * 1000,
+          ).toLocaleTimeString("en-US", {
             hour12: false,
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
           });
           setFormattedTimestamp(formatted);
         }
         break;
 
-      case 'HEURISTIC_ALERT_TRIGGERED':
+      case "HEURISTIC_ALERT_TRIGGERED":
         setIsSecure(false);
         setIsAiAnalyzing(true);
         setStatusConfig({
-          title: payload.heuristic?.likelyType ?? 'RF ANOMALY DETECTED',
-          subtitle: 'Active EM Breach // Akamai Agent Analyzing...',
-          bgColor: 'bg-amber-950/80 border-amber-500 text-amber-200',
-          pulseColor: 'bg-amber-500',
-          icon: <ShieldAlert className="w-5 h-5 text-amber-400 animate-bounce" />,
+          title: payload.heuristic?.likelyType ?? "RF ANOMALY DETECTED",
+          subtitle: "Active EM Breach // Akamai Agent Analyzing...",
+          bgColor: "bg-amber-950/80 border-amber-500 text-amber-200",
+          pulseColor: "bg-amber-500",
+          icon: (
+            <ShieldAlert className="w-5 h-5 text-amber-400 animate-bounce" />
+          ),
         });
         break;
 
-      case 'INCIDENT_ALERT': {
+      case "INCIDENT_ALERT": {
         // Do not flip live header state if this frame is a historical replay
         if (payload.isReplay) return;
 
@@ -109,16 +115,16 @@ export default function Header({ onResetAlarm }: HeaderProps) {
           payload.verdict?.threat_type ||
           payload.threat_type ||
           payload.classification ||
-          'UNKNOWN_ANOMALY'
+          "UNKNOWN_ANOMALY"
         ).toUpperCase();
 
         // If the LLM/Classifier marked it as a false positive or benign noise
         const isFalsePositive =
-          threatTitle === 'FALSE_POSITIVE' ||
-          threatTitle === 'BENIGN' ||
-          threatTitle === 'NOISE_ARTIFACT' ||
-          payload.status === 'BENIGN' ||
-          payload.status === 'FALSE_POSITIVE';
+          threatTitle === "FALSE_POSITIVE" ||
+          threatTitle === "BENIGN" ||
+          threatTitle === "NOISE_ARTIFACT" ||
+          payload.status === "BENIGN" ||
+          payload.status === "FALSE_POSITIVE";
 
         if (isFalsePositive) {
           setIsSecure(true);
@@ -129,26 +135,26 @@ export default function Header({ onResetAlarm }: HeaderProps) {
         // Genuine threat breach
         setIsSecure(false);
         const containmentAction =
-          payload.verdict?.action ?? payload.actionTaken ?? 'LOCK_TERMINAL';
+          payload.verdict?.action ?? payload.actionTaken ?? "LOCK_TERMINAL";
 
         setStatusConfig({
           title: threatTitle,
           subtitle: `Active Breach // Containment: ${containmentAction}`,
-          bgColor: 'bg-rose-950/80 border-rose-500 text-rose-200',
-          pulseColor: 'bg-rose-500',
+          bgColor: "bg-rose-950/80 border-rose-500 text-rose-200",
+          pulseColor: "bg-rose-500",
           icon: <ShieldAlert className="w-5 h-5 text-rose-400 animate-pulse" />,
         });
         break;
       }
 
-      case 'STATUS_RECOVERED':
+      case "STATUS_RECOVERED":
         setIsSecure(true);
         setIsAiAnalyzing(false);
         setStatusConfig(DEFAULT_STATUS_CONFIG);
         break;
 
-      case 'INGEST_STATUS_CHANGE':
-        setIngestOnline(payload.status === 'ONLINE');
+      case "INGEST_STATUS_CHANGE":
+        setIngestOnline(payload.status === "ONLINE");
         break;
     }
   }, [lastMessage]);
@@ -166,7 +172,9 @@ export default function Header({ onResetAlarm }: HeaderProps) {
         {/* Brand & Terminal Target */}
         <div className="flex items-center gap-3">
           <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-zinc-900 border border-zinc-700/80 shadow-inner">
-            <Radio className={`w-5 h-5 ${!isSecure ? 'text-rose-400 animate-pulse' : 'text-cyan-400'}`} />
+            <Radio
+              className={`w-5 h-5 ${!isSecure ? "text-rose-400 animate-pulse" : "text-cyan-400"}`}
+            />
           </div>
           <div>
             <div className="flex items-center gap-2">
@@ -188,11 +196,17 @@ export default function Header({ onResetAlarm }: HeaderProps) {
         </div>
 
         {/* Primary Digital Status Badge */}
-        <div className={`flex items-center justify-between sm:justify-start gap-4 px-4 py-2 rounded-xl border transition-all duration-300 shadow-lg ${statusConfig.bgColor}`}>
+        <div
+          className={`flex items-center justify-between sm:justify-start gap-4 px-4 py-2 rounded-xl border transition-all duration-300 shadow-lg ${statusConfig.bgColor}`}
+        >
           <div className="flex items-center gap-3">
             <div className="relative flex items-center justify-center">
-              <span className={`absolute inline-flex h-3 w-3 rounded-full opacity-75 animate-ping ${statusConfig.pulseColor}`} />
-              <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${statusConfig.pulseColor}`} />
+              <span
+                className={`absolute inline-flex h-3 w-3 rounded-full opacity-75 animate-ping ${statusConfig.pulseColor}`}
+              />
+              <span
+                className={`relative inline-flex rounded-full h-2.5 w-2.5 ${statusConfig.pulseColor}`}
+              />
             </div>
             {statusConfig.icon}
             <div>
@@ -223,35 +237,49 @@ export default function Header({ onResetAlarm }: HeaderProps) {
           <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300">
             <Cpu className="w-3.5 h-3.5 text-zinc-400" />
             <span className="text-zinc-500">TARGET:</span>
-            <span className="text-zinc-200 font-semibold">{isMounted ? activeDeviceId : "Waiting"}</span>
+            <span className="text-zinc-200 font-semibold">
+              {isMounted ? activeDeviceId : "Waiting"}
+            </span>
           </div>
 
           {/* Live Timestamp Pill */}
           <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300">
             <span className="text-zinc-500">TS:</span>
-            <span className="text-zinc-200 font-semibold">{isMounted ? formattedTimestamp : "AWAITING"}</span>
+            <span className="text-zinc-200 font-semibold">
+              {isMounted ? formattedTimestamp : "AWAITING"}
+            </span>
           </div>
 
           {/* Akamai Hosted Agent Pill */}
-          <div className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border transition-all ${
-            isAiAnalyzing 
-              ? 'bg-amber-950/40 border-amber-600 text-amber-300 animate-pulse'
-              : 'bg-zinc-900 border-zinc-800 text-zinc-300'
-          }`}>
-            <Sparkles className={`w-3.5 h-3.5 ${isAiAnalyzing ? 'text-amber-400' : 'text-blue-400'}`} />
+          <div
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border transition-all ${
+              isAiAnalyzing
+                ? "bg-amber-950/40 border-amber-600 text-amber-300 animate-pulse"
+                : "bg-zinc-900 border-zinc-800 text-zinc-300"
+            }`}
+          >
+            <Sparkles
+              className={`w-3.5 h-3.5 ${isAiAnalyzing ? "text-amber-400" : "text-blue-400"}`}
+            />
             <Cloud className="w-3.5 h-3.5 text-blue-400" />
             <span className="text-zinc-500">AKAMAI AGENT:</span>
-            <span className={isAiAnalyzing ? 'text-amber-300 font-semibold' : 'text-zinc-200'}>
-              {isAiAnalyzing ? 'INFERRING...' : 'READY'}
+            <span
+              className={
+                isAiAnalyzing ? "text-amber-300 font-semibold" : "text-zinc-200"
+              }
+            >
+              {isAiAnalyzing ? "INFERRING..." : "READY"}
             </span>
           </div>
 
           {/* WebSocket Ingestion Link */}
-          <div className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border ${
-            isMounted && isConnected && ingestOnline
-              ? 'bg-zinc-900 border-zinc-800 text-zinc-300' 
-              : 'bg-rose-950/50 border-rose-800 text-rose-300'
-          }`}>
+          <div
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border ${
+              isMounted && isConnected && ingestOnline
+                ? "bg-zinc-900 border-zinc-800 text-zinc-300"
+                : "bg-rose-950/50 border-rose-800 text-rose-300"
+            }`}
+          >
             {isMounted && isConnected && ingestOnline ? (
               <>
                 <Wifi className="w-3.5 h-3.5 text-emerald-400" />

@@ -1,6 +1,7 @@
 // lib/db.ts
-import { drizzle } from "drizzle-orm/bun-sql";
+
 import { SQL } from "bun";
+import { drizzle } from "drizzle-orm/bun-sql";
 import * as schema from "./schema";
 
 if (!process.env.DATABASE_URL) {

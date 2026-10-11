@@ -1,4 +1,10 @@
-import { pgTable, serial, text, doublePrecision, integer } from "drizzle-orm/pg-core";
+import {
+  doublePrecision,
+  integer,
+  pgTable,
+  serial,
+  text,
+} from "drizzle-orm/pg-core";
 
 export const incidentVerdicts = pgTable("incident_verdicts", {
   id: serial("id").primaryKey(), // Uses PostgreSQL sequence (1, 2, 3...)

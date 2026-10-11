@@ -1,7 +1,7 @@
-'use client';
+"use client";
 
-import React, { createContext, useContext, ReactNode } from 'react';
-import { useWebSocket } from '@/hooks/useWebSockets';
+import { createContext, type ReactNode, useContext } from "react";
+import { useWebSocket } from "@/hooks/useWebSockets";
 
 interface WebSocketContextType {
   isConnected: boolean;
@@ -11,7 +11,7 @@ interface WebSocketContextType {
 }
 
 export interface TelemetryPayload {
-  event: 'TELEMETRY_POINT';
+  event: "TELEMETRY_POINT";
   deviceId: string;
   rssi: number;
   spectrum: Record<string, number>;
@@ -20,7 +20,7 @@ export interface TelemetryPayload {
 }
 
 export interface HeuristicAlertPayload {
-  event: 'HEURISTIC_ALERT_TRIGGERED';
+  event: "HEURISTIC_ALERT_TRIGGERED";
   deviceId: string;
   timestamp: number;
   status: string;
@@ -44,7 +44,7 @@ export interface HeuristicAlertPayload {
 }
 
 export interface IncidentAlertPayload {
-  event: 'INCIDENT_ALERT';
+  event: "INCIDENT_ALERT";
   incidentId: number;
   deviceId: string;
   timestamp: number;
@@ -65,7 +65,7 @@ export interface IncidentAlertPayload {
 }
 
 export interface StatusRecoveredPayload {
-  event: 'STATUS_RECOVERED';
+  event: "STATUS_RECOVERED";
   incidentId?: number;
   deviceId: string;
   status: string;
@@ -75,7 +75,7 @@ export interface StatusRecoveredPayload {
 }
 
 export interface IngestStatusChangePayload {
-  event: 'INGEST_STATUS_CHANGE';
+  event: "INGEST_STATUS_CHANGE";
   status: string;
   deviceId: string;
   activeIngestCount: number;
@@ -98,12 +98,12 @@ interface WebSocketProviderProps {
 }
 
 export function WebSocketProvider({ url, children }: WebSocketProviderProps) {
-  console.log('[DEBUG] Rendering WebSocketProvider with URL:', url);
+  console.log("[DEBUG] Rendering WebSocketProvider with URL:", url);
   // Uses the hook internally to maintain one single persistent connection
   const webSocketState = useWebSocket({
     url,
-    onConnect: () => console.log('Shared WebSocket connection established'),
-    onDisconnect: () => console.log('Shared WebSocket connection lost'),
+    onConnect: () => console.log("Shared WebSocket connection established"),
+    onDisconnect: () => console.log("Shared WebSocket connection lost"),
   });
 
   return (
@@ -117,7 +117,9 @@ export function WebSocketProvider({ url, children }: WebSocketProviderProps) {
 export function useSharedWebSocket() {
   const context = useContext(WebSocketContext);
   if (!context) {
-    throw new Error('useSharedWebSocket must be used within a WebSocketProvider');
+    throw new Error(
+      "useSharedWebSocket must be used within a WebSocketProvider",
+    );
   }
   return context;
 }

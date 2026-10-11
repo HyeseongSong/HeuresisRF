@@ -11,7 +11,9 @@ function normalizeTimestamp(ts: number): number {
   return ts > 1e11 ? ts / 1000 : ts;
 }
 
-export function parseHardwarePayload(raw: RawHardwarePayload): POSTelemetryPayload | null {
+export function parseHardwarePayload(
+  raw: RawHardwarePayload,
+): POSTelemetryPayload | null {
   if (!raw.deviceId || typeof raw.timestamp !== "number") return null;
 
   const normalizedTimestamp = normalizeTimestamp(raw.timestamp);
@@ -50,7 +52,7 @@ export function parseHardwarePayload(raw: RawHardwarePayload): POSTelemetryPaylo
   for (let i = 0; i < parsedEntries.length; i++) {
     const p = parsedEntries[i].power;
     powers[i] = p;
-    sumLinearMilliwatts += Math.pow(10, p / 10);
+    sumLinearMilliwatts += 10 ** (p / 10);
   }
 
   const N = powers.length;
@@ -149,9 +151,9 @@ export class POSSignalTracker {
   private readonly MIN_SAMPLES = 4;
 
   // Real RF Detection Thresholds
-  private readonly P_MAX = -40.0;             // Total channel RSSI upper threshold
-  private readonly PEAK_CARRIER_MAX = -32.0;  // Individual carrier spike threshold (-29.7 dBm exceeds this)
-  private readonly P_MIN = -82.0;             // Baseline suppression/cage threshold
+  private readonly P_MAX = -40.0; // Total channel RSSI upper threshold
+  private readonly PEAK_CARRIER_MAX = -32.0; // Individual carrier spike threshold (-29.7 dBm exceeds this)
+  private readonly P_MIN = -82.0; // Baseline suppression/cage threshold
   private readonly RECOVERY_REQUIRED_SEC = 2.0;
 
   private readonly UPPER_BREACH_THRESHOLD = 3;
@@ -211,7 +213,9 @@ export class POSSignalTracker {
     }
 
     // Use median of other bins to prevent comb lines or local mounds from artificially elevating the floor
-    const otherBins = bins.filter((_, idx) => idx !== peakIndex).sort((a, b) => a - b);
+    const otherBins = bins
+      .filter((_, idx) => idx !== peakIndex)
+      .sort((a, b) => a - b);
     const medianOther = otherBins[Math.floor(otherBins.length / 2)] ?? -50.0;
     const spectralSpread = Number((maxVal - medianOther).toFixed(2));
 
@@ -264,13 +268,14 @@ export class POSSignalTracker {
       const prevBaseline = this.deviceBaselines.get(deviceId) ?? rssi;
       this.deviceBaselines.set(
         deviceId,
-        Number((prevBaseline * 0.95 + currentMeanRssi * 0.05).toFixed(2))
+        Number((prevBaseline * 0.95 + currentMeanRssi * 0.05).toFixed(2)),
       );
     }
 
     if (currentState === "COMPROMISED") {
       if (!isBreached) {
-        const firstSafeTime = this.recoveryTimestamps.get(deviceId) ?? timestamp;
+        const firstSafeTime =
+          this.recoveryTimestamps.get(deviceId) ?? timestamp;
         this.recoveryTimestamps.set(deviceId, firstSafeTime);
 
         if (timestamp - firstSafeTime >= this.RECOVERY_REQUIRED_SEC) {
@@ -288,7 +293,8 @@ export class POSSignalTracker {
     const existingCandidate = this.breachCandidates.get(deviceId);
     if (
       existingCandidate &&
-      timestamp - existingCandidate.lastUpdatedTimestamp > this.CANDIDATE_EXPIRY_SEC
+      timestamp - existingCandidate.lastUpdatedTimestamp >
+        this.CANDIDATE_EXPIRY_SEC
     ) {
       this.breachCandidates.delete(deviceId);
     }
@@ -319,17 +325,25 @@ export class POSSignalTracker {
     candidate.peakBins.push(spectral.peakBinIndex);
 
     const reqFrames =
-      breachType === "LOWER" ? this.LOWER_BREACH_THRESHOLD : this.UPPER_BREACH_THRESHOLD;
+      breachType === "LOWER"
+        ? this.LOWER_BREACH_THRESHOLD
+        : this.UPPER_BREACH_THRESHOLD;
     if (candidate.count < reqFrames) return null;
 
     // Temporal requirement: require continuous lower suppression for at least 2.0s
     const durationUnderBreach = timestamp - candidate.firstBreachTimestamp;
-    if (breachType === "LOWER" && durationUnderBreach < this.MIN_LOWER_BREACH_DURATION_SEC) {
+    if (
+      breachType === "LOWER" &&
+      durationUnderBreach < this.MIN_LOWER_BREACH_DURATION_SEC
+    ) {
       return null;
     }
 
     // Frequency stability: allow +/- 1 bin jitter across the threshold window
-    if (breachType === "UPPER" && spectral.peakBinPower > this.PEAK_CARRIER_MAX) {
+    if (
+      breachType === "UPPER" &&
+      spectral.peakBinPower > this.PEAK_CARRIER_MAX
+    ) {
       const recent = candidate.peakBins.slice(-this.UPPER_BREACH_THRESHOLD);
       const isStable = recent.every((b) => Math.abs(b - recent[0]) <= 1);
       if (!isStable) {
@@ -350,7 +364,7 @@ export class POSSignalTracker {
 
     let varSum = 0;
     for (let i = 0; i < actualSliceLen; i++) {
-      varSum += Math.pow(activeSlice[i].rssi - activeMeanRssi, 2);
+      varSum += (activeSlice[i].rssi - activeMeanRssi) ** 2;
     }
     const activeVariance = varSum / actualSliceLen;
 
@@ -372,17 +386,22 @@ export class POSSignalTracker {
     }
     intervals.sort((a, b) => a - b);
 
-    const medianInterval = numIntervals > 0 ? intervals[Math.floor(numIntervals / 2)] : 0;
+    const medianInterval =
+      numIntervals > 0 ? intervals[Math.floor(numIntervals / 2)] : 0;
     const meanInterval = numIntervals > 0 ? intervalSum / numIntervals : 0;
 
     let intervalVarSum = 0;
     for (let i = 0; i < numIntervals; i++) {
-      intervalVarSum += Math.pow(intervals[i] - meanInterval, 2);
+      intervalVarSum += (intervals[i] - meanInterval) ** 2;
     }
-    const intervalStdDev = numIntervals > 0 ? Math.sqrt(intervalVarSum / numIntervals) : 0;
+    const intervalStdDev =
+      numIntervals > 0 ? Math.sqrt(intervalVarSum / numIntervals) : 0;
 
-    const baselineRssi = this.deviceBaselines.get(deviceId) ?? this.DEFAULT_BASELINE_RSSI;
-    const attenuationDropDb = Number(Math.max(0, baselineRssi - activeMeanRssi).toFixed(2));
+    const baselineRssi =
+      this.deviceBaselines.get(deviceId) ?? this.DEFAULT_BASELINE_RSSI;
+    const attenuationDropDb = Number(
+      Math.max(0, baselineRssi - activeMeanRssi).toFixed(2),
+    );
     const effectivePowerDbm = Math.max(activeMeanRssi, spectral.peakBinPower);
 
     const deltaDb = isLowerBreach
@@ -390,12 +409,15 @@ export class POSSignalTracker {
       : Number((effectivePowerDbm - this.P_MAX).toFixed(2));
 
     const powerSurgeRatio = isLowerBreach
-      ? Number(Math.pow(10, attenuationDropDb / 10).toFixed(1))
-      : (deltaDb > 0 ? Number(Math.pow(10, deltaDb / 10).toFixed(1)) : 1.0);
+      ? Number((10 ** (attenuationDropDb / 10)).toFixed(1))
+      : deltaDb > 0
+        ? Number((10 ** (deltaDb / 10)).toFixed(1))
+        : 1.0;
 
     let likelyType: ThreatType = "FALSE_POSITIVE";
     if (isLowerBreach && !isUpperBreach) {
-      likelyType = attenuationDropDb >= 12.0 ? "COMMUNICATION_JAMMING" : "FALSE_POSITIVE";
+      likelyType =
+        attenuationDropDb >= 12.0 ? "COMMUNICATION_JAMMING" : "FALSE_POSITIVE";
     } else if (
       spectral.peakBinPower > this.PEAK_CARRIER_MAX ||
       (spectral.isNarrowbandSpike && effectivePowerDbm >= this.P_MAX)
@@ -430,7 +452,9 @@ export class POSSignalTracker {
         isAttenuationBreach: isLowerBreach,
         medianIntervalMs: medianInterval,
         intervalStdDevMs: Math.round(intervalStdDev),
-        durationSec: Number((series[series.length - 1].t - series[0].t).toFixed(2)),
+        durationSec: Number(
+          (series[series.length - 1].t - series[0].t).toFixed(2),
+        ),
         deltaDb,
         powerSurgeRatio,
         likelyType,

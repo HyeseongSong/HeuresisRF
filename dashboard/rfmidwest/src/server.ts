@@ -1,10 +1,10 @@
 // server.ts
 import type { ServerWebSocket } from "bun";
 import { sql } from "drizzle-orm";
+import { evaluateWithAgent } from "./agent";
 import { db } from "./lib/db";
 import { incidentVerdicts } from "./lib/schema";
 import { POSSignalTracker, parseHardwarePayload } from "./tracker";
-import { evaluateWithAgent } from "./agent";
 import type { RawHardwarePayload, WSData } from "./types";
 
 const WS_PORT = 3001;
@@ -24,20 +24,23 @@ try {
   if (existing.length > 0) {
     incidentSeq = Math.max(0, ...existing.map((r) => Number(r.id) || 0));
     await db.execute(
-      sql`SELECT setval(pg_get_serial_sequence('incident_verdicts', 'id'), ${incidentSeq}, true)`
+      sql`SELECT setval(pg_get_serial_sequence('incident_verdicts', 'id'), ${incidentSeq}, true)`,
     );
   } else {
     incidentSeq = 0;
     await db.execute(
-      sql`SELECT setval(pg_get_serial_sequence('incident_verdicts', 'id'), 1, false)`
+      sql`SELECT setval(pg_get_serial_sequence('incident_verdicts', 'id'), 1, false)`,
     );
   }
   console.log(`[WS BACKEND] Seeded incident ID sequence at: ${incidentSeq}`);
 } catch (e) {
-  console.warn("[WS BACKEND] Could not sync initial incident sequence with DB:", e);
+  console.warn(
+    "[WS BACKEND] Could not sync initial incident sequence with DB:",
+    e,
+  );
 }
 
-let server = Bun.serve<WSData>({
+const server = Bun.serve<WSData>({
   port: WS_PORT,
   hostname: "0.0.0.0",
 
@@ -46,9 +49,13 @@ let server = Bun.serve<WSData>({
 
     if (url.pathname === "/ingest" || url.pathname === "/egress") {
       const type = url.pathname === "/ingest" ? "INGEST" : "EGRESS";
-      const upgraded = server.upgrade(req, { data: { type, connectedAt: Date.now() } });
+      const upgraded = server.upgrade(req, {
+        data: { type, connectedAt: Date.now() },
+      });
       if (upgraded) return undefined;
-      return new Response(`WebSocket Upgrade Failed (${url.pathname})`, { status: 400 });
+      return new Response(`WebSocket Upgrade Failed (${url.pathname})`, {
+        status: 400,
+      });
     }
 
     return new Response("Not Found", { status: 404 });
@@ -72,7 +79,7 @@ let server = Bun.serve<WSData>({
               activeDevices: activeList,
               activeIngestCount: activeIngestConnections,
               timestamp: Number((Date.now() / 1000).toFixed(2)),
-            })
+            }),
           );
         }
 
@@ -86,7 +93,11 @@ let server = Bun.serve<WSData>({
               if (record.classification === "SECURE_RECOVERED") continue;
 
               const recordTimestamp = (record as any).createdAt
-                ? Number((new Date((record as any).createdAt).getTime() / 1000).toFixed(2))
+                ? Number(
+                    (
+                      new Date((record as any).createdAt).getTime() / 1000
+                    ).toFixed(2),
+                  )
                 : Number((Date.now() / 1000).toFixed(2));
 
               ws.send(
@@ -99,16 +110,20 @@ let server = Bun.serve<WSData>({
                   isReplay: true, // Tag as historical record
                   verdict: {
                     threat_type: record.classification,
-                    confidence: record.confidence != null ? Number(record.confidence) : undefined,
+                    confidence:
+                      record.confidence != null
+                        ? Number(record.confidence)
+                        : undefined,
                     rationale: record.rationale,
                     action: record.actionTaken,
                   },
-                })
+                }),
               );
             }
 
             // 3. Sync client with the CURRENT in-memory state of the terminal
-            const currentState = deviceSecurityState.get(primaryDevice) ?? "SECURE";
+            const currentState =
+              deviceSecurityState.get(primaryDevice) ?? "SECURE";
             if (currentState === "SECURE") {
               ws.send(
                 JSON.stringify({
@@ -117,7 +132,7 @@ let server = Bun.serve<WSData>({
                   status: "SECURE",
                   reason: "SUSTAINED_BASELINE",
                   timestamp: Number((Date.now() / 1000).toFixed(2)),
-                })
+                }),
               );
             }
           });
@@ -136,7 +151,7 @@ let server = Bun.serve<WSData>({
           status: "ONLINE",
           activeIngestCount: activeIngestConnections,
           timestamp: Number((Date.now() / 1000).toFixed(2)),
-        })
+        }),
       );
     },
 
@@ -145,7 +160,9 @@ let server = Bun.serve<WSData>({
 
       try {
         const raw: RawHardwarePayload =
-          typeof message === "string" ? JSON.parse(message) : JSON.parse(message.toString());
+          typeof message === "string"
+            ? JSON.parse(message)
+            : JSON.parse(message.toString());
         const payload = parseHardwarePayload(raw);
         if (!payload) return;
 
@@ -162,7 +179,7 @@ let server = Bun.serve<WSData>({
               deviceId: payload.deviceId,
               activeIngestCount: activeIngestConnections,
               timestamp: Number((Date.now() / 1000).toFixed(2)),
-            })
+            }),
           );
         } else if (ws.data.deviceId !== payload.deviceId) {
           return;
@@ -177,7 +194,7 @@ let server = Bun.serve<WSData>({
             spectrum: raw.spectrum ?? {},
             fft: payload.fft,
             timestamp: payload.timestamp,
-          })
+          }),
         );
 
         const result = tracker.processReading(payload);
@@ -197,7 +214,7 @@ let server = Bun.serve<WSData>({
               reason: "SUSTAINED_BASELINE",
               rssi: payload.rssi,
               timestamp: result.recoveryTimestamp,
-            })
+            }),
           );
           return;
         }
@@ -229,7 +246,7 @@ let server = Bun.serve<WSData>({
               sampleCount: metrics.sampleCount,
               durationSec: metrics.durationSec,
             },
-          })
+          }),
         );
 
         if (activeEvaluations.has(metrics.deviceId)) return;
@@ -277,7 +294,7 @@ let server = Bun.serve<WSData>({
               timestamp: Number((Date.now() / 1000).toFixed(2)),
               status: "COMPROMISED",
               verdict,
-            })
+            }),
           );
         } finally {
           activeEvaluations.delete(metrics.deviceId);
@@ -312,7 +329,7 @@ let server = Bun.serve<WSData>({
           deviceId: ws.data.deviceId ?? "unknown",
           activeIngestCount: activeIngestConnections,
           timestamp: Number((Date.now() / 1000).toFixed(2)),
-        })
+        }),
       );
     },
   },

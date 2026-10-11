@@ -14,7 +14,9 @@ export interface POSTelemetryPayload {
   fft: number[]; // 8-point downsampled FFT in dBm
 }
 
-export function parseHardwarePayload(raw: RawHardwarePayload): POSTelemetryPayload | null {
+export function parseHardwarePayload(
+  raw: RawHardwarePayload,
+): POSTelemetryPayload | null {
   if (!raw.device_id || typeof raw.timestamp !== "number") {
     return null;
   }
@@ -49,7 +51,7 @@ export function parseHardwarePayload(raw: RawHardwarePayload): POSTelemetryPaylo
   // Subtracting 10*log10(N) eliminates the +23 dB summation gain
   let sumLinearMilliwatts = 0;
   for (let i = 0; i < N; i++) {
-    sumLinearMilliwatts += Math.pow(10, powers[i] / 10);
+    sumLinearMilliwatts += 10 ** (powers[i] / 10);
   }
   const meanPowerMw = sumLinearMilliwatts / N;
   const channelRssi = Number((10 * Math.log10(meanPowerMw)).toFixed(2));

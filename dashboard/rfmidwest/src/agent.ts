@@ -1,4 +1,9 @@
-import type { AgentVerdict, SpectralAnalysis, ThreatType, WindowMetrics } from "./types";
+import type {
+  AgentVerdict,
+  SpectralAnalysis,
+  ThreatType,
+  WindowMetrics,
+} from "./types";
 
 export const SYSTEM_PROMPT = `You are an elite PCI Security Specialist, Embedded Hardware Forensics Expert, and automated RF Physical-Layer Diagnostics Engine hosted on Akamai Cloud.
 You analyze SDR side-channel RF emissions captured from EMV POS terminals to detect physical tampering, parasitic shimmers, rogue taps, Faraday shielding, and wireless jamming.
@@ -35,7 +40,7 @@ export function createFallbackVerdict(
   deltaDb: number,
   powerSurge: number,
   spectral?: SpectralAnalysis,
-  isAttenuationBreach?: boolean
+  isAttenuationBreach?: boolean,
 ): AgentVerdict {
   if (isAttenuationBreach) {
     return {
@@ -152,8 +157,10 @@ export function createFallbackVerdict(
     threat_type: "FALSE_POSITIVE",
     compromised_vector: "External Ambient Environment",
     risk_level: "LOW",
-    risk_justification: "Transient RF anomaly within acceptable environmental tolerance.",
-    pci_containment_action: "No remediation required. Maintain standard operational state.",
+    risk_justification:
+      "Transient RF anomaly within acceptable environmental tolerance.",
+    pci_containment_action:
+      "No remediation required. Maintain standard operational state.",
     action: "IGNORE",
     confidence: 0.95,
     threat_diagnosis: [
@@ -162,7 +169,8 @@ export function createFallbackVerdict(
       "No sustained parasite coupling on internal traces",
     ],
     // FIX 3A: Added missing required schema fields
-    forensic_analysis: "Ambient RF energy envelope remained below critical hardware thresholds.",
+    forensic_analysis:
+      "Ambient RF energy envelope remained below critical hardware thresholds.",
     pci_compliance_impact: "Compliant. No physical boundaries compromised.",
     rationale: "Transient spatial fluctuation caused by environmental noise.",
   };
@@ -224,25 +232,36 @@ function safeParseAgentResponse(rawText: string): AgentVerdict | null {
       return repairedObj;
     }
   } catch {
-    console.warn("[Agent] JSON auto-repair failed. Snippet:", candidate.slice(-80));
+    console.warn(
+      "[Agent] JSON auto-repair failed. Snippet:",
+      candidate.slice(-80),
+    );
   }
 
   return null;
 }
 
-export async function evaluateWithAgent(metrics: WindowMetrics): Promise<AgentVerdict> {
-  const spectralBins = (metrics.spectral?.bins ?? []).map((b: number) => b.toFixed(1)).join(", ");
+export async function evaluateWithAgent(
+  metrics: WindowMetrics,
+): Promise<AgentVerdict> {
+  const spectralBins = (metrics.spectral?.bins ?? [])
+    .map((b: number) => b.toFixed(1))
+    .join(", ");
   const peakIndex = metrics.spectral?.peakBinIndex ?? 0;
   const peakPower = metrics.spectral?.peakBinPower?.toFixed(1) ?? "-65.0";
   const spread = metrics.spectral?.spectralSpreadDb?.toFixed(1) ?? "0.0";
-  const spikeStatus = metrics.spectral?.isNarrowbandSpike ? "CONFIRMED (Carrier Peak)" : "ABSENT (Flat Spectrum)";
+  const spikeStatus = metrics.spectral?.isNarrowbandSpike
+    ? "CONFIRMED (Carrier Peak)"
+    : "ABSENT (Flat Spectrum)";
 
   // Reconstruct baseline from meanRssi and deltaDb
   const baselineRssi = metrics.isAttenuationBreach
     ? (metrics.meanRssi - metrics.deltaDb).toFixed(1)
     : "-62.0";
 
-  const attenuationFactor = metrics.powerSurgeRatio ? `${metrics.powerSurgeRatio}x` : "1.0x";
+  const attenuationFactor = metrics.powerSurgeRatio
+    ? `${metrics.powerSurgeRatio}x`
+    : "1.0x";
   const dropMagnitude = Math.abs(metrics.deltaDb).toFixed(1);
 
   // FIX 4B: Removed accidental newlines after labels in template literal
@@ -266,7 +285,9 @@ export async function evaluateWithAgent(metrics: WindowMetrics): Promise<AgentVe
 - Sustained Window Duration: ${metrics.durationSec.toFixed(2)}s (${metrics.sampleCount} total samples, uninterrupted suppression)
 - Heuristic Pre-Classifier: ${metrics.likelyType}`;
 
-  const targetUrl = process.env.AGENT_ENDPOINT_URL || "https://ws.akamai-workshops.com/v1/chat/completions";
+  const targetUrl =
+    process.env.AGENT_ENDPOINT_URL ||
+    "https://ws.akamai-workshops.com/v1/chat/completions";
   const apiKey = process.env.AGENT_API_KEY || process.env.AKAMAI_AI_TOKEN || "";
   const modelId = process.env.AGENT_MODEL || "meta/llama-3-8b-instruct";
 
@@ -293,17 +314,21 @@ export async function evaluateWithAgent(metrics: WindowMetrics): Promise<AgentVe
 
     // FIX 2C: Handle and log non-2xx HTTP responses explicitly
     if (!res.ok) {
-      const errText = await res.text().catch(() => "Could not read response body");
+      const errText = await res
+        .text()
+        .catch(() => "Could not read response body");
       console.warn(`[!] Agent API returned HTTP ${res.status}:${errText}`);
     } else {
       const data = await res.json();
-      const rawText: string = data.choices?.[0]?.message?.content ?? data.response;
+      const rawText: string =
+        data.choices?.[0]?.message?.content ?? data.response;
       const parsed = safeParseAgentResponse(rawText);
 
       if (parsed) {
         return {
           ...parsed,
-          confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0.95,
+          confidence:
+            typeof parsed.confidence === "number" ? parsed.confidence : 0.95,
           rationale:
             parsed.rationale ||
             (Array.isArray(parsed.threat_diagnosis)
@@ -314,7 +339,9 @@ export async function evaluateWithAgent(metrics: WindowMetrics): Promise<AgentVe
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : "Unknown error";
-    console.warn(`[!] Cloud AI unreachable (${message}). Using PCI fallback...`);
+    console.warn(
+      `[!] Cloud AI unreachable (${message}). Using PCI fallback...`,
+    );
   }
 
   return createFallbackVerdict(
@@ -322,6 +349,6 @@ export async function evaluateWithAgent(metrics: WindowMetrics): Promise<AgentVe
     metrics.deltaDb,
     metrics.powerSurgeRatio,
     metrics.spectral,
-    metrics.isAttenuationBreach
+    metrics.isAttenuationBreach,
   );
 }

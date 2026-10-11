@@ -10,6 +10,15 @@ interface WebSocketContextType {
   disconnect: () => void;
 }
 
+export interface TelemetryPayload {
+  event: string;
+  device_id: string;
+  rssi: number;
+  spectrum: Record<string, number>; // For dynamic keys like "47.20M", "48.17M"
+  fft: number[];
+  timestamp: number;
+}
+
 const WebSocketContext = createContext<WebSocketContextType | null>(null);
 
 interface WebSocketProviderProps {

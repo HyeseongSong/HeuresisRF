@@ -12,7 +12,7 @@ import {
   RotateCcw,
   Sparkles
 } from 'lucide-react';
-import { useSharedWebSocket } from '@/hooks/webSocketConnection';
+import { useSharedWebSocket, TelemetryPayload } from '@/hooks/webSocketConnection';
 
 export type TamperState = 'SECURE' | 'BREACH_UPPER' | 'BREACH_LOWER';
 
@@ -46,11 +46,14 @@ export default function Header({
 
   const { isConnected, lastMessage } = useSharedWebSocket();
 
-  // Safely fallback to prop default before initial WS frame arrives or during SSR
-  const activeDeviceId = (isMounted && lastMessage?.device_id) ? lastMessage.device_id : deviceId;
+  const telemetry = lastMessage as TelemetryPayload | null;
 
-  const formattedTimestamp = isMounted && lastMessage?.timestamp 
-    ? new Date(lastMessage.timestamp * 1000).toLocaleTimeString('en-US', {
+
+  // Safely fallback to prop default before initial WS frame arrives or during SSR
+  const activeDeviceId = (isMounted && telemetry?.device_id) ? telemetry.device_id : deviceId;
+
+  const formattedTimestamp = isMounted && telemetry?.timestamp 
+    ? new Date(telemetry.timestamp * 1000).toLocaleTimeString('en-US', {
         hour12: false,
         hour: '2-digit',
         minute: '2-digit',

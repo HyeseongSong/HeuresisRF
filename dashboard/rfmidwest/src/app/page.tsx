@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { CartesianGrid, Line, LineChart, XAxis, YAxis, ResponsiveContainer, Tooltip } from 'recharts';
-import { useSharedWebSocket } from '@/hooks/webSocketConnection';
+import { useSharedWebSocket, TelemetryPayload } from '@/hooks/webSocketConnection';
 
 export default function Home() {
   const [isMounted, setIsMounted] = useState(false);
@@ -12,8 +12,14 @@ export default function Home() {
     setIsMounted(true);
   }, []);
 
+  const telemetry = lastMessage as TelemetryPayload | null;
+
+  if (!telemetry) {
+    return <div>Waiting for telemetry data...</div>;
+  }
+
   // Safe fallback: uses empty object if spectrum is null/undefined during SSR or before first WS frame
-  const data = Object.entries(lastMessage?.spectrum ?? {}).map(([key, value]) => ({
+  const data = Object.entries(telemetry?.spectrum ?? {}).map(([key, value]) => ({
     mhz: parseFloat(key.replace('M', '')), // Numeric float for Recharts numeric domain
     rssi: value,
   }));

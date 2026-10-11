@@ -3,9 +3,13 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "bun run --watch src/server.ts",
+    "dev:ws": "bun run --watch src/server.ts",
+    "dev:next": "next dev",
+    "dev": "concurrently -n \"WS,NEXT\" -c \"magenta,cyan\" \"bun run dev:ws\" \"bun run dev:next\"",
     "build": "next build",
-    "start": "NODE_ENV=production bun run src/server.ts",
+    "start:ws": "NODE_ENV=production bun run src/server.ts",
+    "start:next": "next start",
+    "start": "concurrently -n \"WS,NEXT\" -c \"magenta,cyan\" \"bun run start:ws\" \"bun run start:next\"",
     "lint": "biome check",
     "format": "biome format --write"
   },
@@ -26,6 +30,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "babel-plugin-react-compiler": "1.0.0",
+    "concurrently": "^10.0.6",
     "drizzle-kit": "^0.31.11",
     "postgres": "^3.4.9",
     "tailwindcss": "^4",

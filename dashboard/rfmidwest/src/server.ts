@@ -1,201 +1,35 @@
-import next from "next";
+// server.ts
 import type { ServerWebSocket } from "bun";
-import { IncomingMessage, ServerResponse } from "node:http";
-import { Socket } from "node:net";
 import { db } from "./lib/db";
 import { incidentVerdicts } from "./lib/schema";
 import { POSSignalTracker, parseHardwarePayload } from "./tracker";
 import { evaluateWithAgent } from "./agent";
 import type { RawHardwarePayload, WSData } from "./types";
 
-const dev = process.env.NODE_ENV !== "production";
-const app = next({ dev });
-const handle = app.getRequestHandler();
-const PORT = parseInt(process.env.PORT || "3000", 10);
-
-await app.prepare();
+const WS_PORT = 3001;
 
 const tracker = new POSSignalTracker();
 let activeIngestConnections = 0;
 const connectedIngestDevices = new Map<string, number>();
 const activeEvaluations = new Set<string>();
 
-function forwardToNext(req: Request): Promise<Response> {
-  const url = new URL(req.url);
-
-  return new Promise<Response>((resolve) => {
-    const socket = new Socket();
-    const nodeReq = new IncomingMessage(socket);
-
-    nodeReq.url = url.pathname + url.search;
-    nodeReq.method = req.method;
-
-    req.headers.forEach((val, key) => {
-      const lower = key.toLowerCase();
-      // Prevent Next.js from gzipping the internal stream; Bun handles compression natively.
-      if (lower !== "accept-encoding") {
-        nodeReq.headers[lower] = val;
-      }
-    });
-
-    if (req.body) {
-      const reader = req.body.getReader();
-      (async () => {
-        try {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) {
-              nodeReq.push(null);
-              break;
-            }
-            nodeReq.push(Buffer.from(value));
-          }
-        } catch (err) {
-          nodeReq.destroy(err instanceof Error ? err : new Error(String(err)));
-        }
-      })();
-    } else {
-      nodeReq.push(null);
-    }
-
-    const nodeRes = new ServerResponse(nodeReq);
-
-    let responseResolved = false;
-    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null;
-
-    const cleanup = () => {
-      if (!socket.destroyed) {
-        socket.destroy();
-      }
-    };
-
-    const flushHeadersAndStartStream = () => {
-      if (responseResolved) return;
-      responseResolved = true;
-
-      const headers = new Headers();
-      const rawHeaders = nodeRes.getHeaders();
-      for (const [key, val] of Object.entries(rawHeaders)) {
-        if (val === undefined || val === null) continue;
-        const lowerKey = key.toLowerCase();
-
-        // Omit hop-by-hop and chunk/length headers that interfere with streaming fetch responses
-        if (
-          lowerKey === "transfer-encoding" ||
-          lowerKey === "content-encoding" ||
-          lowerKey === "content-length"
-        ) {
-          continue;
-        }
-
-        if (Array.isArray(val)) {
-          val.forEach((v) => headers.append(key, String(v)));
-        } else {
-          headers.set(key, String(val));
-        }
-      }
-
-      const readable = new ReadableStream<Uint8Array>({
-        start(controller) {
-          streamController = controller;
-        },
-        cancel() {
-          cleanup();
-        },
-      });
-
-      resolve(
-        new Response(readable, {
-          status: nodeRes.statusCode || 200,
-          statusText: nodeRes.statusMessage || "OK",
-          headers,
-        })
-      );
-    };
-
-    const toBuffer = (chunk: any, encoding?: any): Uint8Array => {
-      if (Buffer.isBuffer(chunk)) return chunk;
-      if (typeof chunk === "string") {
-        return Buffer.from(
-          chunk,
-          (typeof encoding === "string" ? encoding : undefined) as BufferEncoding
-        );
-      }
-      return Buffer.from(chunk);
-    };
-
-    const origWriteHead = nodeRes.writeHead.bind(nodeRes);
-    (nodeRes as any).writeHead = (...args: any[]) => {
-      const res = (origWriteHead as Function)(...args);
-      flushHeadersAndStartStream();
-      return res;
-    };
-
-    nodeRes.flushHeaders = () => {
-      flushHeadersAndStartStream();
-    };
-
-    nodeRes.write = (chunk: any, encoding?: any, cb?: any) => {
-      flushHeadersAndStartStream();
-      if (chunk && streamController) {
-        streamController.enqueue(toBuffer(chunk, encoding));
-      }
-      if (typeof encoding === "function") encoding();
-      if (typeof cb === "function") cb();
-      return true;
-    };
-
-    nodeRes.end = (chunk?: any, encoding?: any, cb?: any) => {
-      flushHeadersAndStartStream();
-      if (chunk && streamController) {
-        streamController.enqueue(toBuffer(chunk, encoding));
-      }
-
-      if (streamController) {
-        try {
-          streamController.close();
-        } catch {}
-      }
-
-      cleanup();
-      if (typeof encoding === "function") encoding();
-      if (typeof cb === "function") cb();
-      return nodeRes;
-    };
-
-    nodeRes.on("finish", cleanup);
-    nodeRes.on("close", cleanup);
-    socket.on("error", cleanup);
-
-    handle(nodeReq, nodeRes).catch((err) => {
-      console.error("[Next.js Render Error]:", err);
-      cleanup();
-      if (!responseResolved) {
-        resolve(new Response("Internal Server Error", { status: 500 }));
-      } else if (streamController) {
-        try {
-          streamController.error(err);
-        } catch {}
-      }
-    });
-  });
-}
-
-Bun.serve<WSData>({
-  port: PORT,
+let server = Bun.serve<WSData>({
+  port: WS_PORT,
   hostname: "0.0.0.0",
 
   fetch(req, server) {
     const url = new URL(req.url);
 
     if (url.pathname === "/ingest" || url.pathname === "/egress") {
+      console.log(`[WS BACKEND] Upgrade request received for: ${url.pathname}`);
       const type = url.pathname === "/ingest" ? "INGEST" : "EGRESS";
       const upgraded = server.upgrade(req, { data: { type, connectedAt: Date.now() } });
+      console.log(`[WS BACKEND] Upgrade result: ${upgraded}`);
       if (upgraded) return undefined;
       return new Response(`WebSocket Upgrade Failed (${url.pathname})`, { status: 400 });
     }
 
-    return forwardToNext(req);
+    return new Response("Not Found", { status: 404 });
   },
 
   websocket: {
@@ -219,7 +53,7 @@ Bun.serve<WSData>({
       }
 
       activeIngestConnections++;
-      ws.publish(
+      server.publish(
         "dashboard-feed",
         JSON.stringify({
           event: "INGEST_STATUS_CHANGE",
@@ -244,7 +78,7 @@ Bun.serve<WSData>({
           const count = connectedIngestDevices.get(payload.deviceId) ?? 0;
           connectedIngestDevices.set(payload.deviceId, count + 1);
 
-          ws.publish(
+          server.publish(
             "dashboard-feed",
             JSON.stringify({
               event: "INGEST_STATUS_CHANGE",
@@ -258,7 +92,7 @@ Bun.serve<WSData>({
           return;
         }
 
-        ws.publish(
+        server.publish(
           "dashboard-feed",
           JSON.stringify({
             event: "TELEMETRY_POINT",
@@ -299,7 +133,7 @@ Bun.serve<WSData>({
             console.error("[Postgres Recovery Write Error]:", dbErr);
           }
 
-          ws.publish(
+          server.publish(
             "dashboard-feed",
             JSON.stringify({
               event: "STATUS_RECOVERED",
@@ -315,7 +149,7 @@ Bun.serve<WSData>({
         }
 
         const { metrics } = result;
-        ws.publish(
+        server.publish(
           "dashboard-feed",
           JSON.stringify({
             event: "HEURISTIC_ALERT_TRIGGERED",
@@ -373,7 +207,7 @@ Bun.serve<WSData>({
             console.error("[Postgres Incident Write Error]:", dbErr);
           }
 
-          ws.publish(
+          server.publish(
             "dashboard-feed",
             JSON.stringify({
               event: "INCIDENT_ALERT",
@@ -409,7 +243,7 @@ Bun.serve<WSData>({
         }
       }
 
-      ws.publish(
+      server.publish(
         "dashboard-feed",
         JSON.stringify({
           event: "INGEST_STATUS_CHANGE",
@@ -423,4 +257,4 @@ Bun.serve<WSData>({
   },
 });
 
-console.log(`> Bun runtime active on http://0.0.0.0:${PORT}`);
+console.log(`> Bun WebSocket service listening on ws://0.0.0.0:${WS_PORT}`);

@@ -256,8 +256,7 @@ export async function evaluateWithAgent(metrics: WindowMetrics): Promise<AgentVe
 - Sustained Window Duration: ${metrics.durationSec}s (${metrics.sampleCount} total samples)
 - Heuristic Pre-Classifier: ${metrics.likelyType}`;
 
-  // FIX 1A: Stripped Markdown link syntax from the fallback URL
-  const targetUrl = process.env.AGENT_ENDPOINT_URL || "https://api.linode.com/v4/ai/inference";
+  const targetUrl = process.env.AGENT_ENDPOINT_URL || "https://ws.akamai-workshops.com/v1/chat/completions";
   const apiKey = process.env.AGENT_API_KEY || process.env.AKAMAI_AI_TOKEN || "";
   const modelId = process.env.AGENT_MODEL || "meta/llama-3-8b-instruct";
 

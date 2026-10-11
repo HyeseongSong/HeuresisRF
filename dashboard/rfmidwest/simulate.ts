@@ -1,5 +1,5 @@
 // simulate.ts
-const WS_URL = process.env.TARGET_WS_URL || "ws://localhost:3000/ingest";
+const WS_URL = process.env.TARGET_WS_URL || "ws://localhost:3001/ingest";
 const DEVICE_ID = "pos_terminal_01";
 
 const socket = new WebSocket(WS_URL);
@@ -143,7 +143,7 @@ function streamData() {
   const { spectrum, peakFreq, peakVal, approxRssi } = generateSpectrum();
 
   const payload = {
-    device_id: DEVICE_ID,
+    deviceId: DEVICE_ID,
     timestamp: Number((Date.now() / 1000).toFixed(2)),
     spectrum,
   };

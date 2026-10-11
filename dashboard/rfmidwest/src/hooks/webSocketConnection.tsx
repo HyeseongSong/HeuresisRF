@@ -98,6 +98,7 @@ interface WebSocketProviderProps {
 }
 
 export function WebSocketProvider({ url, children }: WebSocketProviderProps) {
+  console.log('[DEBUG] Rendering WebSocketProvider with URL:', url);
   // Uses the hook internally to maintain one single persistent connection
   const webSocketState = useWebSocket({
     url,

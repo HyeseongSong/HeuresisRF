@@ -11,111 +11,114 @@ import {
   WifiOff, 
   RotateCcw,
   Sparkles,
-  Satellite
 } from 'lucide-react';
 import { 
   useSharedWebSocket,
   WebSocketMessage 
 } from '@/hooks/webSocketConnection';
 
-// export type TamperState = 'SECURE' | 'BREACH_UPPER' | 'BREACH_LOWER';
-
 interface HeaderProps {
-  // status?: TamperState;
-  // deviceId?: string;
-  // isWsConnected?: boolean;
-  // currentRssi?: number | null;
-  // pMax?: number;
-  // pMin?: number;
-  // isAiAnalyzing?: boolean;
   onResetAlarm?: () => void;
 }
 
-export default function Header({
-  // status = 'SECURE',
-  // deviceId = 'pos_terminal_01',
-  // currentRssi = -58.4,
-  // pMax = -55.0,
-  // pMin = -85.0,
-  // isAiAnalyzing = false,
-  onResetAlarm,
-}: HeaderProps) {
+interface StatusConfig {
+  title: string;
+  subtitle: string;
+  bgColor: string;
+  pulseColor: string;
+  icon: React.ReactNode;
+}
 
-  // Prevent SSR evaluation crashes by verifying client mounting
+const DEFAULT_STATUS_CONFIG: StatusConfig = {
+  title: 'SYSTEM SECURE // EM RUNTIME BOUNDS OK',
+  subtitle: 'Active SDR Physical Layer Monitoring',
+  bgColor: 'bg-emerald-950/60 border-emerald-500/70 text-emerald-200',
+  pulseColor: 'bg-emerald-400',
+  icon: <ShieldCheck className="w-5 h-5 text-emerald-400" />,
+};
+
+export default function Header({ onResetAlarm }: HeaderProps) {
+  console.log('[DEBUG] Rendering Header component');
   const [isMounted, setIsMounted] = useState(false);
+  const { isConnected, lastMessage } = useSharedWebSocket();
+
+  // Internal persistent component state
+  const [isSecure, setIsSecure] = useState(true);
+  const [isAiAnalyzing, setIsAiAnalyzing] = useState(false);
+  const [formattedTimestamp, setFormattedTimestamp] = useState('AWAITING');
+  const [activeDeviceId, setActiveDeviceId] = useState('Waiting');
+  const [ingestOnline, setIngestOnline] = useState(true);
+  const [statusConfig, setStatusConfig] = useState<StatusConfig>(DEFAULT_STATUS_CONFIG);
+
   useEffect(() => {
     setIsMounted(true);
   }, []);
-  const [secure, setSecure] = useState(false);
-  const [isAiAnalyzing, setIsAiAnalysing] = useState(false);
-  const [formattedTimestamp, setFormattedTimestamp] = useState('AWAITING');
-  const [statusConfig, setStatusConfig] = useState({
-    title: 'SYSTEM SECURE // EM RUNTIME BOUNDS OK',
-    subtitle: 'Active SDR Physical Layer Monitoring',
-    bgColor: 'bg-emerald-950/60 border-emerald-500/70 text-emerald-200',
-    pulseColor: 'bg-emerald-400',
-    icon: <ShieldCheck className="w-5 h-5 text-emerald-400" />,
-  });
 
+  // Update component state whenever a new WebSocket message arrives
+  useEffect(() => {
+    if (!lastMessage) return;
 
-  const { isConnected, lastMessage } = useSharedWebSocket();
+    const payload = lastMessage as WebSocketMessage;
 
-  const payload = lastMessage as WebSocketMessage | null;
+    if ('deviceId' in payload && payload.deviceId) {
+      setActiveDeviceId(payload.deviceId);
+    }
 
-  // Safely fallback to prop default before initial WS frame arrives or during SSR
-  const activeDeviceId = (isMounted && payload?.deviceId) ? payload.deviceId : "Waiting";
-
-  switch (payload?.event) {
-    case "TELEMETRY_POINT":
-      setFormattedTimestamp(isMounted && payload.timestamp 
-        ? new Date(payload.timestamp * 1000).toLocaleTimeString('en-US', {
+    switch (payload.event) {
+      case 'TELEMETRY_POINT':
+        if (payload.timestamp) {
+          const formatted = new Date(payload.timestamp * 1000).toLocaleTimeString('en-US', {
             hour12: false,
             hour: '2-digit',
             minute: '2-digit',
             second: '2-digit',
-          })
-        : 'AWAITING...');
-      break;
-    case "HEURISTIC_ALERT_TRIGGERED":
-      setSecure(false);
-      setIsAiAnalysing(true);
-      setStatusConfig({
-        title: payload.heuristic.likelyType,
-        subtitle: "Potential Incident Detected",
-        bgColor: 'bg-amber-950/80 border-amber-500 text-amber-200',
-        pulseColor: 'bg-amber-500',
-        icon: <ShieldAlert className="w-5 h-5 text-amber-400 animate-bounce" />,
-      });
-      break;
-    case "INCIDENT_ALERT":
-      setSecure(false);
-      setIsAiAnalysing(false);
-      setStatusConfig({
-        title: payload.status,
-        subtitle: "Threat Detected",
-        bgColor: 'bg-amber-950/80 border-amber-500 text-amber-200',
-        pulseColor: 'bg-amber-500',
-        icon: <ShieldAlert className="w-5 h-5 text-amber-400 animate-bounce" />,
-      });
-      break;
-    case "INGEST_STATUS_CHANGE":
-      if (payload.status == "ONLINE") {
-        setIsMounted(true);
-      } else {
-        setIsMounted(false);
-      }
-      break;
-    case "STATUS_RECOVERED":
-    default:
-      setStatusConfig({
-        title: 'SYSTEM SECURE // EM RUNTIME BOUNDS OK',
-        subtitle: 'Active SDR Physical Layer Monitoring',
-        bgColor: 'bg-emerald-950/60 border-emerald-500/70 text-emerald-200',
-        pulseColor: 'bg-emerald-400',
-        icon: <ShieldCheck className="w-5 h-5 text-emerald-400" />,
-      });
-  }
+          });
+          setFormattedTimestamp(formatted);
+        }
+        break;
 
+      case 'HEURISTIC_ALERT_TRIGGERED':
+        setIsSecure(false);
+        setIsAiAnalyzing(true);
+        setStatusConfig({
+          title: payload.heuristic.likelyType,
+          subtitle: 'Potential Incident Detected',
+          bgColor: 'bg-amber-950/80 border-amber-500 text-amber-200',
+          pulseColor: 'bg-amber-500',
+          icon: <ShieldAlert className="w-5 h-5 text-amber-400 animate-bounce" />,
+        });
+        break;
+
+      case 'INCIDENT_ALERT':
+        setIsSecure(false);
+        setIsAiAnalyzing(false);
+        setStatusConfig({
+          title: payload.status,
+          subtitle: 'Threat Detected',
+          bgColor: 'bg-amber-950/80 border-amber-500 text-amber-200',
+          pulseColor: 'bg-amber-500',
+          icon: <ShieldAlert className="w-5 h-5 text-amber-400 animate-bounce" />,
+        });
+        break;
+
+      case 'STATUS_RECOVERED':
+        setIsSecure(true);
+        setIsAiAnalyzing(false);
+        setStatusConfig(DEFAULT_STATUS_CONFIG);
+        break;
+
+      case 'INGEST_STATUS_CHANGE':
+        setIngestOnline(payload.status === 'ONLINE');
+        break;
+    }
+  }, [lastMessage]);
+
+  const handleReset = () => {
+    setIsSecure(true);
+    setIsAiAnalyzing(false);
+    setStatusConfig(DEFAULT_STATUS_CONFIG);
+    onResetAlarm?.();
+  };
 
   return (
     <header className="sticky top-0 z-50 w-full border-b border-zinc-800 bg-zinc-950/90 backdrop-blur-md px-4 py-3 sm:px-6 transition-colors duration-300">
@@ -124,7 +127,7 @@ export default function Header({
         {/* Brand & Terminal Target */}
         <div className="flex items-center gap-3">
           <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-zinc-900 border border-zinc-700/80 shadow-inner">
-            <Radio className={`w-5 h-5 ${!secure ? 'text-rose-400 animate-pulse' : 'text-cyan-400'}`} />
+            <Radio className={`w-5 h-5 ${!isSecure ? 'text-rose-400 animate-pulse' : 'text-cyan-400'}`} />
           </div>
           <div>
             <div className="flex items-center gap-2">
@@ -163,10 +166,10 @@ export default function Header({
             </div>
           </div>
 
-          {/* Reset / Silence Button */}
-          {!secure && onResetAlarm && (
+          {/* Reset Button */}
+          {!isSecure && onResetAlarm && (
             <button
-              onClick={onResetAlarm}
+              onClick={handleReset}
               className="ml-2 flex items-center gap-1.5 px-2.5 py-1 text-xs font-mono font-medium rounded-md bg-zinc-900/90 text-zinc-200 border border-zinc-700 hover:bg-zinc-800 hover:text-white transition-all shadow"
             >
               <RotateCcw className="w-3.5 h-3.5" />
@@ -182,13 +185,13 @@ export default function Header({
           <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300">
             <Cpu className="w-3.5 h-3.5 text-zinc-400" />
             <span className="text-zinc-500">TARGET:</span>
-            <span className="text-zinc-200 font-semibold">{activeDeviceId}</span>
+            <span className="text-zinc-200 font-semibold">{isMounted ? activeDeviceId : "Waiting"}</span>
           </div>
 
           {/* Live Timestamp Pill */}
           <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-zinc-900 border border-zinc-800 text-zinc-300">
             <span className="text-zinc-500">TS:</span>
-            <span className="text-zinc-200 font-semibold">{formattedTimestamp}</span>
+            <span className="text-zinc-200 font-semibold">{isMounted ? formattedTimestamp : "AWAITING"}</span>
           </div>
 
           {/* Akamai Hosted Agent Pill */}
@@ -207,11 +210,11 @@ export default function Header({
 
           {/* WebSocket Ingestion Link */}
           <div className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border ${
-            isMounted && isConnected 
+            isMounted && isConnected && ingestOnline
               ? 'bg-zinc-900 border-zinc-800 text-zinc-300' 
               : 'bg-rose-950/50 border-rose-800 text-rose-300'
           }`}>
-            {isMounted && isConnected ? (
+            {isMounted && isConnected && ingestOnline ? (
               <>
                 <Wifi className="w-3.5 h-3.5 text-emerald-400" />
                 <span className="text-zinc-500">GATEWAY:</span>

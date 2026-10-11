@@ -1,5 +1,5 @@
-# RFMidwest
+# Heuresis
 HackMidwest 2026
 
 
-Building RF Detection
+Building RF Detection for card skimmers on POS

@@ -652,6 +652,7 @@ await app.prepare();
 
 Bun.serve<WSData>({
   port: PORT,
+  hostname: "0.0.0.0",
 
   async fetch(req, server) {
     const url = new URL(req.url);
